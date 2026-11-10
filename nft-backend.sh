@@ -147,7 +147,7 @@ nft_lockdown() {
     fi
     echo
     warn '只管理 inet portman_filter 表；Fail2Ban 的 f2b-table 保持不变。'
-    warn '不再要求另开 SSH 测试，也不启用 180 秒定时回滚；请核对以上端口。'
+    warn '确认后直接生效并保存；请在执行前核对 SSH 和业务端口。'
     confirm_yes '确认应用并保存 nftables 入站白名单？' || { cancelled; return 0; }
 
     install -d -m 700 "$NFT_CONFIG_DIR" || return 1
