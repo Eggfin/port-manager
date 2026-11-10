@@ -108,3 +108,90 @@ nft_rollback() {
     info 'nftables 已恢复修改前的 portman 状态，Fail2Ban 未受影响'
 }
 
+nft_lockdown() {
+    nft_require || return 1
+    local keep extra ports protos proto port note
+    if nft_owned && [[ ! -f $NFT_STATE_FILE ]]; then
+        error '已存在同名但不受 portman 管理的规则表，拒绝覆盖'
+        return 1
+    fi
+    if [[ ! -d /run/systemd/system ]] || ! has systemd-run || ! has systemctl; then
+        error '此操作需要 systemd-run 自动回滚支持，以防 SSH 失联'
+        return 1
+    fi
+    if [[ -f $NFT_PENDING_MARK ]]; then
+        error '上一次 nftables 修改尚未完成确认，请先处理回滚状态'
+        return 1
+    fi
+
+    keep=$(keep_list) || return 1
+    echo '将保留以下正在监听的端口和 SSH，其余入站连接默认拒绝：'
+    printf '  %-7s %-11s %s\n' 协议 端口 服务
+    while read -r proto port note; do
+        [[ -n $proto ]] && printf '  %-7s %-11s %s\n' "$proto" "$port" "$note"
+    done <<<"$keep"
+    echo
+    read -rp '额外保留端口 (80,443 / 8000-8100；留空跳过): ' extra
+    if [[ -n $extra ]]; then
+        ports=$(parse_ports "$extra") || return 1
+        read -rp '协议 tcp/udp/both [默认 tcp]: ' protos
+        protos=$(parse_proto "${protos:-tcp}") || return 1
+        for port in $ports; do
+            for proto in $protos; do keep+=$'\n'"$proto $port 手动保留"; done
+        done
+    fi
+    echo
+    warn '只管理 inet portman_filter 表；Fail2Ban 的 f2b-table 完全保留。'
+    warn '配置应用后 180 秒内必须验证另一 SSH 登录并输入 yes，否则自动回滚。'
+    confirm_yes '确定启用 nftables 入站白名单？' || { cancelled; return 0; }
+
+    install -d -m 700 /etc/portman || return 1
+    printf '%s\n' "$keep" | awk 'NF >= 2 && !seen[$1 " " $2]++ { print $1, $2 }' >"$NFT_PENDING_FILE"
+    chmod 600 "$NFT_PENDING_FILE"
+    nft_validate_state "$NFT_PENDING_FILE" || { rm -f "$NFT_PENDING_FILE"; return 1; }
+    if [[ -f $NFT_STATE_FILE ]]; then
+        cp -p "$NFT_STATE_FILE" "$NFT_PREVIOUS_FILE" || return 1
+    else
+        rm -f "$NFT_PREVIOUS_FILE"
+    fi
+    printf 'pending\n' >"$NFT_PENDING_MARK"
+    chmod 600 "$NFT_PENDING_MARK"
+
+    if ! systemd-run --quiet --unit=portman-nft-rollback --on-active=180s "$INSTALL_PATH" nft-rollback; then
+        error '无法启动自动回滚定时器，未应用新规则'
+        rm -f "$NFT_PENDING_MARK" "$NFT_PENDING_FILE" "$NFT_PREVIOUS_FILE"
+        return 1
+    fi
+    if ! nft_apply "$NFT_PENDING_FILE"; then
+        nft_rollback
+        return 1
+    fi
+    echo
+    warn '临时规则已应用！请立刻在另一 SSH 窗口验证能否重新登录。'
+    if ! confirm_yes '验证成功后，输入 yes 保存；否则回滚'; then
+        nft_rollback
+        return 1
+    fi
+    if [[ ! -f $NFT_PENDING_MARK ]]; then
+        error '自动回滚已经发生，请重新执行 lockdown'
+        return 1
+    fi
+    nft_cancel_timer
+    if [[ ! -f $NFT_PENDING_MARK ]]; then
+        error '自动回滚已发生；不会保存失效的配置'
+        return 1
+    fi
+    if ! install -m 600 "$NFT_PENDING_FILE" "$NFT_STATE_FILE" || ! nft_persist; then
+        error '持久化失败，正在恢复旧配置'
+        if [[ -f $NFT_PREVIOUS_FILE ]]; then
+            cp -p "$NFT_PREVIOUS_FILE" "$NFT_STATE_FILE"
+        else
+            rm -f "$NFT_STATE_FILE"
+        fi
+        nft_rollback
+        return 1
+    fi
+    rm -f "$NFT_PENDING_MARK" "$NFT_PENDING_FILE" "$NFT_PREVIOUS_FILE"
+    info 'nftables 白名单已保存并启用开机恢复；Fail2Ban 规则未修改'
+}
+
