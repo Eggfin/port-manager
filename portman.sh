@@ -237,6 +237,12 @@ fw_rule_list() {
                 for (j = 1; j <= n; j++) { r = a[j]; sub(/:/, "-", r); print proto ":" r }
             }'
             ;;
+        nftables)
+            if has nft && nft list table inet portman_filter >/dev/null 2>&1 &&
+               [[ -f /etc/portman/nftables-ports.conf ]]; then
+                awk '$1 ~ /^(tcp|udp)$/ && $2 ~ /^[0-9]+(-[0-9]+)?$/ {print $1 ":" $2}' /etc/portman/nftables-ports.conf
+            fi
+            ;;
     esac
 }
 
@@ -245,11 +251,12 @@ fw_rule_list() {
 #   $1: all | public | <端口号>
 # ---------------------------------------------------------------------------
 show_ports() {
-    local mode=${1:-all} data fw allowed="" defopen=0
+    local mode=${1:-all} data fw allowed="" defopen=0 nft_managed=0
     data=$(collect_listen) || return 1
 
     if is_root; then
         fw=$(detect_firewall)
+        [[ $fw == nftables ]] && nft list table inet portman_filter >/dev/null 2>&1 && nft_managed=1
         allowed=$(fw_rule_list "$fw" | tr '\n' ' ')
         fw_default_open "$fw" && defopen=1
     else
@@ -258,7 +265,7 @@ show_ports() {
     fi
 
     printf '%s\n' "$data" | LC_ALL=C awk -F'|' \
-        -v mode="$mode" -v fw="$fw" -v allowed="$allowed" -v defopen="$defopen" \
+        -v mode="$mode" -v fw="$fw" -v allowed="$allowed" -v defopen="$defopen" -v nft_managed="$nft_managed" \
         -v G="$GREEN" -v R="$RED" -v Y="$YELLOW" -v C="$CYAN" -v B="$BOLD" -v P="$PLAIN" '
     # 显示宽度: 3 字节的中文按 2 列算，2 字节字符按 1 列算
     function dw(s,   t, n3, n2) {
@@ -353,7 +360,7 @@ show_ports() {
             s = svc[port "/" proto]; if (s == "") s = common[port]; if (s == "") s = "-"
             if (PUB[k]) {
                 npub++; scope = cell("公网", 7, Y)
-                if (fw == "unknown" || fw == "nftables") st = cell("未知", 9, "")
+                if (fw == "unknown" || (fw == "nftables" && !nft_managed)) st = cell("未知", 9, "")
                 else if (fw == "none") st = cell("无防火墙", 9, Y)
                 else if (fw_allows(proto, port)) st = cell("已放行", 9, G)
                 else if (defopen) st = cell("默认放行", 9, Y)
@@ -371,7 +378,7 @@ show_ports() {
             printf "  防火墙对该端口:"
             split("tcp udp", pr, " ")
             for (i = 1; i <= 2; i++) {
-                if (fw == "unknown" || fw == "nftables") st = "未知"
+                if (fw == "unknown" || (fw == "nftables" && !nft_managed)) st = "未知"
                 else if (fw == "none") st = Y "无防火墙" P
                 else if (fw_allows(pr[i], mode + 0)) st = G "已放行 (有放行规则)" P
                 else if (defopen) st = Y "默认放行 (没有规则，但防火墙不拦截)" P
@@ -391,7 +398,7 @@ show_ports() {
     if (( defopen )) && [[ $fw != none ]]; then
         printf '  %s(入站默认放行：防火墙不拦截任何端口，有程序监听的端口外部都能访问)%s' "$YELLOW" "$PLAIN"
         printf '\n%s如需拦截没在使用的端口，请用主菜单第 6 项「一键关闭其他端口」%s' "$YELLOW" "$PLAIN"
-    elif [[ $fw == ufw || $fw == firewalld || $fw == iptables ]]; then
+    elif [[ $fw == ufw || $fw == firewalld || $fw == iptables || ( $fw == nftables && $nft_managed == 1 ) ]]; then
         printf '  %s(入站默认拒绝：只有已放行的端口能访问)%s' "$GREEN" "$PLAIN"
     fi
     echo
