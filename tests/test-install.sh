@@ -21,6 +21,7 @@ while (($#)); do
 done
 case "$url" in
     */portman.sh) source_file=portman.sh;;
+    */nft-backend.sh) source_file=nft-backend.sh;;
     */route-report.sh)
         [[ ${FAKE_FAIL_MODULE:-0} == 1 ]] && exit 22
         source_file=route-report.sh;;
@@ -34,7 +35,8 @@ export PATH="$temp/bin:$PATH" MOCK_SOURCE_DIR="$source_dir"
 bash install.sh > "$temp/install.log"
 test -x /usr/local/bin/portman
 test -x /usr/local/lib/portman/route-report.sh
-/usr/local/bin/portman version | grep -Fq 'v1.7.3'
+test -x /usr/local/lib/portman/nft-backend.sh
+/usr/local/bin/portman version | grep -Fq 'v1.7.4'
 /usr/local/bin/portman route help > "$temp/route-help"
 grep -Fq '默认上海三网快速测试' "$temp/route-help"
 
@@ -51,6 +53,7 @@ if FAKE_FAIL_MODULE=1 /usr/local/bin/portman update > "$temp/fail.log" 2>&1; the
 fi
 cmp -s /usr/local/bin/portman "$source_dir/portman.sh"
 cmp -s /usr/local/lib/portman/route-report.sh "$source_dir/route-report.sh"
+cmp -s /usr/local/lib/portman/nft-backend.sh "$source_dir/nft-backend.sh"
 /usr/local/bin/portman update > "$temp/update.log"
 grep -Fq '已经是最新版本' "$temp/update.log"
 cmp -s /usr/local/lib/portman/route-report.sh "$source_dir/route-report.sh"
