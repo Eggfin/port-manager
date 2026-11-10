@@ -195,3 +195,112 @@ nft_lockdown() {
     info 'nftables 白名单已保存并启用开机恢复；Fail2Ban 规则未修改'
 }
 
+nft_open_close() {
+    nft_require || return 1
+    local action=$1 ports=$2 protos=$3 proto port tmp changed=0
+    if ! nft_owned && [[ ! -f $NFT_STATE_FILE ]]; then
+        if [[ $action == open ]]; then
+            warn 'portman 的 nftables 白名单尚未启用；当前其他 nftables 规则是否放行须单独核实'
+        else
+            error '当前没有 portman 白名单可关闭端口；请先执行 portman lockdown'
+            return 1
+        fi
+        return 0
+    fi
+    if [[ ! -f $NFT_STATE_FILE ]]; then
+        error '发现未登记的 portman 规则表；为避免覆盖，拒绝修改'
+        return 1
+    fi
+    if [[ -f $NFT_PENDING_MARK ]]; then error '有待确认的规则操作，暂不允许修改'; return 1; fi
+    tmp=$(mktemp) || return 1
+    cp "$NFT_STATE_FILE" "$tmp" || { rm -f "$tmp"; return 1; }
+    for port in $ports; do
+        for proto in $protos; do
+            if [[ $action == open ]]; then
+                if ! grep -Fxq "$proto $port" "$tmp"; then
+                    printf '%s %s\n' "$proto" "$port" >>"$tmp"
+                    changed=1
+                fi
+            else
+                if grep -Fxq "$proto $port" "$tmp"; then
+                    grep -Fxv "$proto $port" "$tmp" >"$tmp.filtered" || true
+                    mv "$tmp.filtered" "$tmp"
+                    changed=1
+                else
+                    warn "未找到精确的 $proto/$port 放行项（范围规则需按完整范围移除）"
+                fi
+            fi
+        done
+    done
+    if (( changed )); then
+        if ! nft_apply "$tmp"; then rm -f "$tmp"; return 1; fi
+        install -m 600 "$tmp" "$NFT_STATE_FILE" || {
+            error '配置保存失败，正在恢复磁盘中保留的原规则'
+            nft_apply "$NFT_STATE_FILE" || true
+            rm -f "$tmp"; return 1
+        }
+        info '已更新 portman nftables 白名单，并保存到磁盘'
+    else
+        info '规则未发生变化'
+    fi
+    rm -f "$tmp"
+}
+
+nft_close_ports() {
+    local ports=$1 protos=$2 sshp
+    if sshp=$(hits_ssh_port "$ports"); then
+        error "为了防止远程失联，拒绝关闭 SSH 端口 $sshp；请先改用其他 SSH 端口"
+        return 1
+    fi
+    nft_open_close close "$ports" "$protos"
+}
+
+nft_unlock() {
+    nft_require || return 1
+    if ! nft_owned && [[ ! -f $NFT_STATE_FILE ]]; then
+        info '没有由 portman 管理的 nftables 限制规则'
+        return 0
+    fi
+    [[ ! -f $NFT_PENDING_MARK ]] || { error '等待规则确认/回滚中，暂不能解锁'; return 1; }
+    confirm_yes '仅删除 portman 端口白名单 (不会清除 Fail2Ban)，确认？' || { cancelled; return 0; }
+    if nft_owned; then nft delete table inet "$NFT_TABLE" || return 1; fi
+    systemctl disable "$NFT_SERVICE_NAME" >/dev/null 2>&1 || true
+    rm -f "$NFT_STATE_FILE" "$NFT_SERVICE_FILE"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    info 'portman 入站限制已撤销；Fail2Ban 及其他防火墙规则保持原状'
+}
+
+nft_status() {
+    nft_require || return 1
+    if nft_owned; then
+        echo 'portman 独立白名单：已启用（入站默认拒绝）'
+        if [[ -f $NFT_STATE_FILE ]]; then
+            echo 'portman 已登记的放行规则：'
+            sed 's/^/  /' "$NFT_STATE_FILE"
+        else
+            warn '检测到运行中的规则，但没有对应的持久化配置！'
+        fi
+        if systemctl is-enabled "$NFT_SERVICE_NAME" >/dev/null 2>&1; then
+            echo '开机恢复：已启用'
+        else
+            warn '开机恢复：未启用'
+        fi
+    else
+        echo 'portman 白名单：未启用；无法仅凭本模块判断其他表是否允许入站'
+    fi
+    echo '完整原生 nftables 规则 (包括 Fail2Ban)：'
+    nft -a list ruleset
+}
+
+nft_dispatch_main() {
+    case $1 in
+        lockdown) nft_lockdown ;;
+        unlock) nft_unlock ;;
+        open) nft_open_close open "$2" "$3" ;;
+        close) nft_close_ports "$2" "$3" ;;
+        status) nft_status ;;
+        restore) nft_restore ;;
+        rollback) nft_rollback ;;
+        *) error '未知 nftables 子命令'; return 1 ;;
+    esac
+}
