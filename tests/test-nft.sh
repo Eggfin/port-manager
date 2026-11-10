@@ -11,6 +11,7 @@ source ./nft-backend.sh
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+NFT_CONFIG_DIR="$work"
 NFT_STATE_FILE="$work/ports.conf"
 NFT_PREVIOUS_FILE="$work/previous.conf"
 NFT_PENDING_FILE="$work/pending.conf"
@@ -78,4 +79,32 @@ touch "$NFT_PENDING_MARK"
 nft_rollback
 [[ ! -e $NFT_PENDING_MARK ]] || fail 'rollback marker not removed'
 assert_contains "$work/applied" 'tcp dport 22 accept'
-echo '[PASS] nft syntax, rule isolation, validation, atomic apply, port open/close, SSH protection and rollback'
+
+# Single-confirmation lockdown test: one optional-ports prompt + one yes is sufficient.
+# Never touch the runner's real nftables service or any other table.
+nft_systemd_ready() { return 0; }
+nft_persist() { [[ -s $NFT_STATE_FILE ]] || fail 'persistence should see committed config'; }
+systemd-run() { fail 'legacy timer must not be scheduled'; }
+keep_list() { printf 'tcp 22 SSH\nudp 443 proxy\n'; }
+confirm_yes() {
+    local response
+    read -r response || return 1
+    [[ $response == yes ]]
+}
+rm -f "$work/owned" "$NFT_STATE_FILE" "$NFT_PENDING_FILE" "$NFT_PENDING_MARK"
+printf '\nyes\n' | nft_lockdown >"$work/lockdown-output"
+assert_contains "$work/lockdown-output" 'nftables 白名单已直接生效并保存'
+assert_contains "$NFT_STATE_FILE" 'tcp 22'
+assert_contains "$NFT_STATE_FILE" 'udp 443'
+[[ ! -f $NFT_PENDING_MARK ]] || fail 'pending marker remains after success'
+if grep -Fq '180 秒' "$work/lockdown-output"; then fail 'outdated second-session prompt'; fi
+
+# Failure to save must revert the temporary rule changes and remove the pending state.
+nft_persist() { return 1; }
+rm -f "$NFT_STATE_FILE" "$work/owned"
+if printf '\nyes\n' | nft_lockdown >"$work/failure-output" 2>&1; then
+    fail 'lockdown should fail when persist fails'
+fi
+[[ ! -f $NFT_STATE_FILE && ! -f $NFT_PENDING_MARK && ! -f "$work/owned" ]] ||
+    fail 'persist failure was not rolled back'
+echo '[PASS] nft syntax, rule isolation, validation, atomic apply, port open/close, SSH protection, single-confirmation commit and failure rollback'

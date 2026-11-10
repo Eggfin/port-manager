@@ -36,7 +36,7 @@ bash install.sh > "$temp/install.log"
 test -x /usr/local/bin/portman
 test -x /usr/local/lib/portman/route-report.sh
 test -x /usr/local/lib/portman/nft-backend.sh
-/usr/local/bin/portman version | grep -Fq 'v1.7.4'
+/usr/local/bin/portman version | grep -Fq 'v1.7.5'
 /usr/local/bin/portman route help > "$temp/route-help"
 grep -Fq '默认上海三网快速测试' "$temp/route-help"
 
