@@ -2003,19 +2003,22 @@ install_route_module() {
 
 update_self() {
     need_root || return 1
-    local tmp module_tmp new
+    local tmp module_tmp nft_tmp new
     tmp=$(mktemp)
     module_tmp=$(mktemp)
+    nft_tmp=$(mktemp)
     info "正在下载最新版本..."
-    # 两个文件都下载并通过语法检查后再替换，避免模块缺失使路由菜单不可用
-    if ! fetch_script portman.sh "$tmp" || ! fetch_script route-report.sh "$module_tmp"; then
-        rm -f "$tmp" "$module_tmp"
+    # 三个脚本都先通过语法检查，再替换现有程序及模块
+    if ! fetch_script portman.sh "$tmp" || ! fetch_script route-report.sh "$module_tmp" ||
+       ! fetch_script nft-backend.sh "$nft_tmp"; then
+        rm -f "$tmp" "$module_tmp" "$nft_tmp"
         error "下载或语法检查失败，未完成更新；请检查网络"
         return 1
     fi
     install_route_module "$module_tmp"
+    install -m 755 "$nft_tmp" "$NFT_MODULE"
     install -m 755 "$tmp" "$INSTALL_PATH"
-    rm -f "$tmp" "$module_tmp"
+    rm -f "$tmp" "$module_tmp" "$nft_tmp"
 
     "$INSTALL_PATH" shortcut >/dev/null
     new=$("$INSTALL_PATH" version)
@@ -2028,12 +2031,19 @@ update_self() {
 
 uninstall_self() {
     need_root || return 1
+    if [[ -f /etc/portman/nftables-pending.mark ]]; then
+        error "nftables 回滚等待中，禁止卸载；请先完成验证或等待自动回滚"
+        return 1
+    fi
     remove_shortcuts
     remove_restore_service
+    systemctl disable portman-nftables.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/portman-nftables.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
     rm -rf "$INSTALL_PATH" "${STATE_FILE%/*}"
-    rm -f "$ROUTE_MODULE"
+    rm -f "$ROUTE_MODULE" "$NFT_MODULE"
     rmdir "${ROUTE_MODULE%/*}" 2>/dev/null || true
-    info "portman 已卸载 (当前防火墙规则保持不变，但重启后不再自动恢复 iptables 规则)"
+    info "portman 已卸载 (当前防火墙规则保持不变，但重启后不再恢复 portman 的 iptables/nftables 规则)"
     if [[ -f $SYSCTL_FILE ]]; then
         warn "IPv6 仍保持禁用。如需恢复，删除 $SYSCTL_FILE 后重启"
     fi
@@ -2059,6 +2069,29 @@ route_dispatch() {
         fi
     fi
     bash "$ROUTE_MODULE" "$@"
+}
+
+# 原生 nftables 模块按需加载：兼容 v1.7.3 的旧更新器（原先只下载两份脚本）。
+nft_dispatch() {
+    local action=$1 tmp
+    shift
+    if [[ ! -r $NFT_MODULE ]]; then
+        need_root || return 1
+        tmp=$(mktemp) || return 1
+        info "首次使用 nftables，正在安装官方仓库中的后端模块..."
+        if fetch_script nft-backend.sh "$tmp"; then
+            install -d -m 755 "${NFT_MODULE%/*}"
+            install -m 755 "$tmp" "$NFT_MODULE"
+            rm -f "$tmp"
+        else
+            rm -f "$tmp"
+            error "nftables 模块下载/语法检查失败，请执行 portman update"
+            return 1
+        fi
+    fi
+    # shellcheck source=nft-backend.sh
+    source "$NFT_MODULE"
+    nft_dispatch_main "$action" "$@"
 }
 
 # ===========================================================================
@@ -2195,9 +2228,11 @@ menu() {
 }
 
 main() {
-    [[ ${1:-} == uninstall || ${1:-} == restore ]] || ensure_shortcuts
+    [[ ${1:-} == uninstall || ${1:-} == restore || ${1:-} == nft-restore || ${1:-} == nft-rollback ]] || ensure_shortcuts
     case ${1:-} in
         restore)         restore_rules ;;
+        nft-restore)     nft_dispatch restore ;;
+        nft-rollback)    nft_dispatch rollback ;;
         "")              menu ;;
         list|ls|l)       show_ports all ;;
         public|pub)      show_ports public ;;
