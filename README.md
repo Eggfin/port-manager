@@ -167,13 +167,24 @@ GitHub Actions 的 `tests/test-route.sh` 使用**模拟 NextTrace JSON** 验证�
 
 ## 支持的防火墙
 
-自动识别并按以下顺序使用：
+自动识别活跃的 **UFW**、**firewalld**、portman 自己的 nftables 表，再按可用后端选择：
 
 1. **UFW**（Ubuntu/Debian 常见）
 2. **firewalld**（CentOS/RHEL/Rocky/Alma 常见）
-3. **iptables**：portman 添加的规则记录在 `/etc/portman/iptables.conf`，并注册 systemd 服务 `portman-restore`，开机时自动恢复。只恢复 portman 自己的规则，不影响 docker、fail2ban 等程序的规则
+3. **原生 nftables**：兼容 Debian 13 等仅存在 Fail2Ban `f2b-table` 的环境。portman 仅创建或更新自己的 `inet portman_filter` 表，**不会清空规则集，也不修改 Fail2Ban、Docker 的其他表**。白名单保存于 `/etc/portman/nftables-ports.conf`，由 `portman-nftables.service` 在开机时恢复
+4. **iptables**：规则记录在 `/etc/portman/iptables.conf`，由 `portman-restore` 恢复
 
-未检测到防火墙时，所有端口默认可访问，无需放行。
+未检测到防火墙时，端口可能默认可访问，但仍受云安全组或其他网络策略控制。对于**只有 Fail2Ban 的 nftables**，在执行第 6 项前并不存在 portman 的入站白名单；此时第 4 项不会错误宣称已放行，第 5 项会提示先启用白名单。
+
+### 原生 nftables 的安全操作
+
+- 第 6 项：列出监听端口与 SSH，支持额外指定 TCP/UDP 端口；**两次输入 `yes`**。应用临时规则后，需在 **180 秒内从另一 SSH 会话重新登录验证**，确认后再保存；否则定时自动回滚
+- 保留回环、已建立/关联连接以及 ICMP/ICMPv6；采用 IPv4/IPv6 共用的 `inet` 表。其他防火墙表的拒绝规则仍可生效，portman 的放行不会绕过 Fail2Ban
+- 第 4/5 项：仅更改已启用的 portman 白名单；关闭 SSH 端口会被拒绝，端口范围必须按完整范围移除
+- 第 7 项：只删除 portman 自己的 nftables 限制，不会把 Fail2Ban 的封禁一起解除
+- 第 8 项：展示 portman 白名单与完整原生 nftables 规则；如果其他表存在独立策略，实际对外可达性仍需测试
+
+**注意**：自动回滚依赖 systemd 和 `systemd-run`。没有该能力时第 6 项会拒绝执行。已监听端口不等于一定应该公网开放，请在确认时按实际业务端口核对；在 VPS 上仍需检查云平台的安全组。
 
 ## 一键关闭其他端口
 

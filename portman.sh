@@ -18,7 +18,7 @@
 # ===========================================================================
 # 1. 配置与通用函数
 # ===========================================================================
-VERSION="1.7.3"
+VERSION="1.7.4"
 REPO="Eggfin/port-manager"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 
@@ -26,6 +26,7 @@ RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 INSTALL_PATH="/usr/local/bin/portman"
 BIN_DIR="/usr/local/bin"
 ROUTE_MODULE="/usr/local/lib/portman/route-report.sh"
+NFT_MODULE="/usr/local/lib/portman/nft-backend.sh"
 SHORTCUTS="s S"
 
 # iptables 规则持久化: portman 添加的规则记录在 STATE_FILE，开机由 systemd 服务恢复
@@ -99,10 +100,6 @@ download() {
     fi
 }
 
-nft_unsupported() {
-    error "检测到原生 nftables 规则，暂不支持自动修改，请手动配置或改用 ufw/firewalld"
-}
-
 # 监听地址是否只限本机 (awk 片段，show_ports 与 keep_list 共用)
 AWK_IS_LOCAL='function is_local(a) {
     return a ~ /^127\./ || a == "[::1]" || a == "::1" || a ~ /^\[::ffff:127\./ || a ~ /%lo$/
@@ -158,6 +155,8 @@ detect_firewall() {
         echo ufw
     elif has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
         echo firewalld
+    elif has nft && nft list table inet portman_filter >/dev/null 2>&1; then
+        echo nftables
     elif has iptables; then
         echo iptables
     elif has nft && nft list ruleset 2>/dev/null | grep -q "hook input"; then
@@ -238,6 +237,12 @@ fw_rule_list() {
                 for (j = 1; j <= n; j++) { r = a[j]; sub(/:/, "-", r); print proto ":" r }
             }'
             ;;
+        nftables)
+            if has nft && nft list table inet portman_filter >/dev/null 2>&1 &&
+               [[ -f /etc/portman/nftables-ports.conf ]]; then
+                awk '$1 ~ /^(tcp|udp)$/ && $2 ~ /^[0-9]+(-[0-9]+)?$/ {print $1 ":" $2}' /etc/portman/nftables-ports.conf
+            fi
+            ;;
     esac
 }
 
@@ -246,11 +251,12 @@ fw_rule_list() {
 #   $1: all | public | <端口号>
 # ---------------------------------------------------------------------------
 show_ports() {
-    local mode=${1:-all} data fw allowed="" defopen=0
+    local mode=${1:-all} data fw allowed="" defopen=0 nft_managed=0
     data=$(collect_listen) || return 1
 
     if is_root; then
         fw=$(detect_firewall)
+        [[ $fw == nftables ]] && nft list table inet portman_filter >/dev/null 2>&1 && nft_managed=1
         allowed=$(fw_rule_list "$fw" | tr '\n' ' ')
         fw_default_open "$fw" && defopen=1
     else
@@ -259,7 +265,7 @@ show_ports() {
     fi
 
     printf '%s\n' "$data" | LC_ALL=C awk -F'|' \
-        -v mode="$mode" -v fw="$fw" -v allowed="$allowed" -v defopen="$defopen" \
+        -v mode="$mode" -v fw="$fw" -v allowed="$allowed" -v defopen="$defopen" -v nft_managed="$nft_managed" \
         -v G="$GREEN" -v R="$RED" -v Y="$YELLOW" -v C="$CYAN" -v B="$BOLD" -v P="$PLAIN" '
     # 显示宽度: 3 字节的中文按 2 列算，2 字节字符按 1 列算
     function dw(s,   t, n3, n2) {
@@ -354,7 +360,7 @@ show_ports() {
             s = svc[port "/" proto]; if (s == "") s = common[port]; if (s == "") s = "-"
             if (PUB[k]) {
                 npub++; scope = cell("公网", 7, Y)
-                if (fw == "unknown" || fw == "nftables") st = cell("未知", 9, "")
+                if (fw == "unknown" || (fw == "nftables" && !nft_managed)) st = cell("未知", 9, "")
                 else if (fw == "none") st = cell("无防火墙", 9, Y)
                 else if (fw_allows(proto, port)) st = cell("已放行", 9, G)
                 else if (defopen) st = cell("默认放行", 9, Y)
@@ -372,7 +378,7 @@ show_ports() {
             printf "  防火墙对该端口:"
             split("tcp udp", pr, " ")
             for (i = 1; i <= 2; i++) {
-                if (fw == "unknown" || fw == "nftables") st = "未知"
+                if (fw == "unknown" || (fw == "nftables" && !nft_managed)) st = "未知"
                 else if (fw == "none") st = Y "无防火墙" P
                 else if (fw_allows(pr[i], mode + 0)) st = G "已放行 (有放行规则)" P
                 else if (defopen) st = Y "默认放行 (没有规则，但防火墙不拦截)" P
@@ -392,7 +398,7 @@ show_ports() {
     if (( defopen )) && [[ $fw != none ]]; then
         printf '  %s(入站默认放行：防火墙不拦截任何端口，有程序监听的端口外部都能访问)%s' "$YELLOW" "$PLAIN"
         printf '\n%s如需拦截没在使用的端口，请用主菜单第 6 项「一键关闭其他端口」%s' "$YELLOW" "$PLAIN"
-    elif [[ $fw == ufw || $fw == firewalld || $fw == iptables ]]; then
+    elif [[ $fw == ufw || $fw == firewalld || $fw == iptables || ( $fw == nftables && $nft_managed == 1 ) ]]; then
         printf '  %s(入站默认拒绝：只有已放行的端口能访问)%s' "$GREEN" "$PLAIN"
     fi
     echo
@@ -551,8 +557,8 @@ open_port() {
             warn "如果是云服务器，请到控制台「安全组」中放行对应端口"
             return 0 ;;
         nftables)
-            nft_unsupported
-            return 1 ;;
+            nft_dispatch open "$ports" "$protos"
+            return $? ;;
     esac
 
     info "使用 $(firewall_name "$fw") 放行端口..."
@@ -602,7 +608,7 @@ close_port() {
 
     case $fw in
         none)     warn "未检测到防火墙，没有可删除的放行规则"; return 0 ;;
-        nftables) nft_unsupported; return 1 ;;
+        nftables) nft_dispatch close "$ports" "$protos"; return $? ;;
     esac
 
     if sshp=$(hits_ssh_port "$ports"); then
@@ -658,7 +664,7 @@ lock_backend() {
     local fw
     fw=$(detect_firewall)
     case $fw in
-        ufw|firewalld) echo "$fw" ;;
+        ufw|firewalld|nftables) echo "$fw" ;;
         *) if has ufw; then echo ufw-off; else echo "$fw"; fi ;;
     esac
 }
@@ -688,8 +694,8 @@ lockdown() {
             error "请先安装 firewalld 或 iptables"; return 1
         fi
     elif [[ $backend == nftables ]]; then
-        nft_unsupported
-        return 1
+        nft_dispatch lockdown
+        return $?
     fi
 
     keep=$(keep_list) || return 1
@@ -766,7 +772,7 @@ unlock() {
     fw=$(detect_firewall)
     case $fw in
         none)     info "未检测到防火墙，所有端口本来就是放行的"; return 0 ;;
-        nftables) nft_unsupported; return 1 ;;
+        nftables) nft_dispatch unlock; return $? ;;
     esac
 
     confirm "将把 $(firewall_name "$fw") 改为「默认放行所有入站端口」，确认?" || { cancelled; return 0; }
@@ -796,8 +802,8 @@ show_firewall() {
 
     printf '%s防火墙类型:%s %s\n' "$BOLD" "$PLAIN" "$(firewall_name "$fw")"
     if [[ $fw == nftables ]]; then
-        warn "原生 nftables 规则暂不支持解析，以下为原始规则"
-        echo; nft list ruleset; return
+        nft_dispatch status
+        return
     fi
 
     printf '%s入站策略:%s   ' "$BOLD" "$PLAIN"
@@ -2004,19 +2010,22 @@ install_route_module() {
 
 update_self() {
     need_root || return 1
-    local tmp module_tmp new
+    local tmp module_tmp nft_tmp new
     tmp=$(mktemp)
     module_tmp=$(mktemp)
+    nft_tmp=$(mktemp)
     info "正在下载最新版本..."
-    # 两个文件都下载并通过语法检查后再替换，避免模块缺失使路由菜单不可用
-    if ! fetch_script portman.sh "$tmp" || ! fetch_script route-report.sh "$module_tmp"; then
-        rm -f "$tmp" "$module_tmp"
+    # 三个脚本都先通过语法检查，再替换现有程序及模块
+    if ! fetch_script portman.sh "$tmp" || ! fetch_script route-report.sh "$module_tmp" ||
+       ! fetch_script nft-backend.sh "$nft_tmp"; then
+        rm -f "$tmp" "$module_tmp" "$nft_tmp"
         error "下载或语法检查失败，未完成更新；请检查网络"
         return 1
     fi
     install_route_module "$module_tmp"
+    install -m 755 "$nft_tmp" "$NFT_MODULE"
     install -m 755 "$tmp" "$INSTALL_PATH"
-    rm -f "$tmp" "$module_tmp"
+    rm -f "$tmp" "$module_tmp" "$nft_tmp"
 
     "$INSTALL_PATH" shortcut >/dev/null
     new=$("$INSTALL_PATH" version)
@@ -2029,12 +2038,19 @@ update_self() {
 
 uninstall_self() {
     need_root || return 1
+    if [[ -f /etc/portman/nftables-pending.mark ]]; then
+        error "nftables 回滚等待中，禁止卸载；请先完成验证或等待自动回滚"
+        return 1
+    fi
     remove_shortcuts
     remove_restore_service
+    systemctl disable portman-nftables.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/portman-nftables.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
     rm -rf "$INSTALL_PATH" "${STATE_FILE%/*}"
-    rm -f "$ROUTE_MODULE"
+    rm -f "$ROUTE_MODULE" "$NFT_MODULE"
     rmdir "${ROUTE_MODULE%/*}" 2>/dev/null || true
-    info "portman 已卸载 (当前防火墙规则保持不变，但重启后不再自动恢复 iptables 规则)"
+    info "portman 已卸载 (当前防火墙规则保持不变，但重启后不再恢复 portman 的 iptables/nftables 规则)"
     if [[ -f $SYSCTL_FILE ]]; then
         warn "IPv6 仍保持禁用。如需恢复，删除 $SYSCTL_FILE 后重启"
     fi
@@ -2060,6 +2076,29 @@ route_dispatch() {
         fi
     fi
     bash "$ROUTE_MODULE" "$@"
+}
+
+# 原生 nftables 模块按需加载：兼容 v1.7.3 的旧更新器（原先只下载两份脚本）。
+nft_dispatch() {
+    local action=$1 tmp
+    shift
+    if [[ ! -r $NFT_MODULE ]]; then
+        need_root || return 1
+        tmp=$(mktemp) || return 1
+        info "首次使用 nftables，正在安装官方仓库中的后端模块..."
+        if fetch_script nft-backend.sh "$tmp"; then
+            install -d -m 755 "${NFT_MODULE%/*}"
+            install -m 755 "$tmp" "$NFT_MODULE"
+            rm -f "$tmp"
+        else
+            rm -f "$tmp"
+            error "nftables 模块下载/语法检查失败，请执行 portman update"
+            return 1
+        fi
+    fi
+    # shellcheck source=nft-backend.sh
+    source "$NFT_MODULE"
+    nft_dispatch_main "$action" "$@"
 }
 
 # ===========================================================================
@@ -2196,9 +2235,11 @@ menu() {
 }
 
 main() {
-    [[ ${1:-} == uninstall || ${1:-} == restore ]] || ensure_shortcuts
+    [[ ${1:-} == uninstall || ${1:-} == restore || ${1:-} == nft-restore || ${1:-} == nft-rollback ]] || ensure_shortcuts
     case ${1:-} in
         restore)         restore_rules ;;
+        nft-restore)     nft_dispatch restore ;;
+        nft-rollback)    nft_dispatch rollback ;;
         "")              menu ;;
         list|ls|l)       show_ports all ;;
         public|pub)      show_ports public ;;

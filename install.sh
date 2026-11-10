@@ -6,6 +6,7 @@
 # 安装内容:
 #   /usr/local/bin/portman                   主程序
 #   /usr/local/lib/portman/route-report.sh   三网路由检测模块
+#   /usr/local/lib/portman/nft-backend.sh     原生 nftables 后端
 
 set -e
 
@@ -13,6 +14,7 @@ REPO="Eggfin/port-manager"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 INSTALL_PATH="/usr/local/bin/portman"
 ROUTE_MODULE="/usr/local/lib/portman/route-report.sh"
+NFT_MODULE="/usr/local/lib/portman/nft-backend.sh"
 
 if [[ -t 1 ]]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; PLAIN=$'\033[0m'
@@ -58,17 +60,21 @@ fi
 
 tmp=$(mktemp)
 route_tmp=$(mktemp)
-trap 'rm -f "$tmp" "$route_tmp"' EXIT
+nft_tmp=$(mktemp)
+trap 'rm -f "$tmp" "$route_tmp" "$nft_tmp"' EXIT
 
-# 两个文件都下载并通过语法检查后才安装
+# 三个文件都下载并通过语法检查后才安装
 info "正在下载 portman..."
 download portman.sh "$tmp"
 download route-report.sh "$route_tmp"
+download nft-backend.sh "$nft_tmp"
 bash -n "$tmp"
 bash -n "$route_tmp"
+bash -n "$nft_tmp"
 
 install -d -m 755 "${ROUTE_MODULE%/*}"
 install -m 755 "$route_tmp" "$ROUTE_MODULE"
+install -m 755 "$nft_tmp" "$NFT_MODULE"
 install -m 755 "$tmp" "$INSTALL_PATH"
 
 info "安装完成: $("$INSTALL_PATH" version)"
