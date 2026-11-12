@@ -221,6 +221,44 @@ GitHub Actions 的 `tests/test-route.sh` 使用**模拟 NextTrace JSON** 验证�
 bash <(curl -fsSL https://raw.githubusercontent.com/Eggfin/port-manager/main/install.sh) && portman ssh addkey abc123 && portman ssh keyonly -y
 ```
 
+## HY2 端口跳跃
+
+安装新版或运行 `sudo portman update` 后，在主菜单选 **15. HY2 端口跳跃管理**，也可以直接运行 `sudo portman hy2`。系统需要运行 systemd，并安装 `nftables`、`iproute2` 和 `util-linux`。使用 nftables 版 iptables 的主机还需对应地址族的 `iptables` / `ip6tables`。
+
+1. 先启动 3x-ui / Xray 的 HY2 入站。选择新增节点，填名称、IPv4 / IPv6 / 双栈、实际 UDP 监听端口、跳跃起止端口和客户端跳跃间隔。向导显示 UDP 监听和进程，能识别唯一的 Xray / Hysteria 候选时将其作为默认值。多个入站共用 Xray 进程时，请按面板确认目标端口。
+2. 例如监听 `443/udp`、跳跃 `20000-20100/udp`、间隔 `30` 秒。云安全组需放行对应地址族的入站 UDP 跳跃范围。如果还提供固定端口连接，另行放行 UDP 443。客户端间隔只影响生成的配置片段。
+3. 用 `sudo portman hy2 examples hk` 查看名为 `hk` 的示例。3x-ui 入站监听端口继续使用 443。面板的 `UDP Hop / Hop Ports` 若只负责生成客户端配置，可填同一范围。若安装的版本会自行绑定范围或写入 NAT，请使用单一实现。把以下字段合并到 Mihomo / Sub-Store 的现有节点，保留原有认证、域名和 TLS 设置。Portman 不读写 3x-ui 数据库。
+
+   ```yaml
+   type: hysteria2
+   port: 443
+   ports: "20000-20100"
+   hop-interval: 30
+   ```
+
+   `ports` 和 `hop-interval` 的语义见 [Mihomo HY2 文档](https://wiki.metacubex.one/config/proxies/hysteria2/)。
+
+4. 执行 `sudo portman hy2 status`，从外部客户端连接并等待跳跃，再检查 NAT 计数、INPUT 计数和客户端连通性。NAT 计数反映新连接的匹配，不能当作整个连接的流量统计。新建时规则立即应用，首次开机恢复或手动运行 `sudo systemctl start portman-hy2.service` 后可查看 `journalctl -u portman-hy2.service`。
+
+**已配置手工跳跃时**，保留 `/usr/local/sbin/hy2-hop-restore.sh`、`hy2-hop.service` 和 `ip hy2_hop` 表。向导识别完全匹配的 `udp dport 20000-20100 counter redirect to :443` 并登记为 `legacy`，原服务继续负责 NAT，Portman 负责该节点的 iptables-nft 放行和诊断。手工规则存在重叠、格式不匹配或恢复脚本存在但规则未加载时，向导会报告冲突。手工规则有修改时，按新参数重新登记。IPv4 与 IPv6 的规则归属不同时，按地址族分开登记。
+
+新增节点使用独立的 `ip portman_hy2` / `ip6 portman_hy2` 表，只重定向目的地址为本机的 UDP 流量。配置保存在 `/etc/portman/hy2/nodes.conf`，上一版为 `nodes.conf.bak`。同一地址族内的跳跃范围不能重叠或覆盖其他节点的监听端口。遇到无法判断范围的已有 DNAT（例如命名集合或映射），模块会提示并停止应用。
+
+在 **iptables-nft** 环境，模块在 INPUT 末尾追加带标记的放行项，同时匹配 UDP 监听端口和重定向前的跳跃范围。现有 Fail2Ban 跳转和更早的拒绝规则先处理。若有显式 DROP/REJECT、其他 nftables 入站链、UFW 或 firewalld，请按当前防火墙策略放行重定向后的 **UDP 监听端口**。使用 Portman 原生 nftables 白名单时，可通过 `sudo portman open 443 udp` 单独管理这项放行。模块服务在原有 Portman、nftables 和手工 HY2 服务之后恢复，独立于原有防火墙配置。
+
+| 命令 | 用途 |
+| --- | --- |
+| `sudo portman hy2` | 新增节点，输入同名可更新 |
+| `sudo portman hy2 status` | 查看规则、监听、开机服务和计数 |
+| `sudo portman hy2 repair` | 重新校验并应用已保存配置，修复缺失规则 |
+| `sudo portman hy2 rollback` | 切换回上一版节点配置 |
+| `sudo portman hy2 remove hk` | 移除指定节点的 Portman 配置 |
+| `sudo portman hy2 uninstall` | 移除 Portman HY2 规则、节点、备份和服务 |
+
+卸载整个 Portman 时也会清理 HY2 模块。手工服务、手工 NAT、SSH 与已有防火墙规则由各自的管理方式保留。重定向修改后，已建立的 UDP 映射随连接跟踪超时自然失效，验证时重新建立客户端连接。
+
+开发验证可运行 `bash tests/test-hy2.sh`。在一次性 Linux 测试机上用 `sudo bash tests/test-hy2-linux.sh` 验证 IPv4 / IPv6 UDP 回包、计数、规则恢复和卸载隔离。
+
 ## 注意
 
 - 阿里云、腾讯云、AWS、GCP 等云服务器还有一层 **安全组**，需要在云控制台放行，本脚本无法修改。

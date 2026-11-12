@@ -18,7 +18,7 @@
 # ===========================================================================
 # 1. 配置与通用函数
 # ===========================================================================
-VERSION="1.7.5"
+VERSION="1.8.0"
 REPO="Eggfin/port-manager"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 
@@ -27,6 +27,7 @@ INSTALL_PATH="/usr/local/bin/portman"
 BIN_DIR="/usr/local/bin"
 ROUTE_MODULE="/usr/local/lib/portman/route-report.sh"
 NFT_MODULE="/usr/local/lib/portman/nft-backend.sh"
+HY2_MODULE="/usr/local/lib/portman/hy2-hop.sh"
 SHORTCUTS="s S"
 
 # iptables 规则持久化: portman 添加的规则记录在 STATE_FILE，开机由 systemd 服务恢复
@@ -528,7 +529,13 @@ EOF
 }
 
 save_iptables() {
-    has netfilter-persistent && netfilter-persistent save >/dev/null 2>&1
+    if has netfilter-persistent; then
+        if [[ -r $HY2_MODULE ]] && has flock; then
+            (source "$HY2_MODULE"; hy2_locked hy2_save_iptables)
+        else
+            netfilter-persistent save >/dev/null 2>&1
+        fi
+    fi
     if install_restore_service; then
         info "规则已保存，重启后自动恢复 (记录在 $STATE_FILE)"
     fi
@@ -2008,24 +2015,24 @@ install_route_module() {
     install -m 755 "$1" "$ROUTE_MODULE"
 }
 
-update_self() {
+update_self() (
     need_root || return 1
-    local tmp module_tmp nft_tmp new
-    tmp=$(mktemp)
-    module_tmp=$(mktemp)
-    nft_tmp=$(mktemp)
+    local temp new
+    temp=$(mktemp -d) || return 1
+    trap 'rm -rf "$temp"' EXIT
     info "正在下载最新版本..."
-    # 三个脚本都先通过语法检查，再替换现有程序及模块
-    if ! fetch_script portman.sh "$tmp" || ! fetch_script route-report.sh "$module_tmp" ||
-       ! fetch_script nft-backend.sh "$nft_tmp"; then
-        rm -f "$tmp" "$module_tmp" "$nft_tmp"
-        error "下载或语法检查失败，未完成更新；请检查网络"
-        return 1
-    fi
-    install_route_module "$module_tmp"
-    install -m 755 "$nft_tmp" "$NFT_MODULE"
-    install -m 755 "$tmp" "$INSTALL_PATH"
-    rm -f "$tmp" "$module_tmp" "$nft_tmp"
+    # 下载并校验全部脚本后再替换已安装文件。
+    local script
+    for script in portman.sh route-report.sh nft-backend.sh hy2-hop.sh; do
+        if ! fetch_script "$script" "$temp/$script"; then
+            error "下载或语法检查失败，未完成更新: $script"
+            return 1
+        fi
+    done
+    install_route_module "$temp/route-report.sh" &&
+        install -m 755 "$temp/nft-backend.sh" "$NFT_MODULE" &&
+        install -m 755 "$temp/hy2-hop.sh" "$HY2_MODULE" &&
+        install -m 755 "$temp/portman.sh" "$INSTALL_PATH" || return 1
 
     "$INSTALL_PATH" shortcut >/dev/null
     new=$("$INSTALL_PATH" version)
@@ -2034,7 +2041,7 @@ update_self() {
     else
         info "已从 v${VERSION} 更新到 ${new#portman }"
     fi
-}
+)
 
 uninstall_self() {
     need_root || return 1
@@ -2042,13 +2049,21 @@ uninstall_self() {
         error "nftables 回滚等待中，禁止卸载；请先完成验证或等待自动回滚"
         return 1
     fi
+    if [[ -f /etc/portman/hy2/nodes.conf || -f /etc/systemd/system/portman-hy2.service ]]; then
+        if [[ ! -r $HY2_MODULE ]]; then
+            error '缺少 HY2 模块，请执行 portman update 后再卸载'
+            return 1
+        fi
+        (source "$HY2_MODULE"; hy2_require && hy2_locked hy2_commit reset) || return 1
+    fi
     remove_shortcuts
     remove_restore_service
     systemctl disable portman-nftables.service >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/portman-nftables.service
     systemctl daemon-reload >/dev/null 2>&1 || true
-    rm -rf "$INSTALL_PATH" "${STATE_FILE%/*}"
-    rm -f "$ROUTE_MODULE" "$NFT_MODULE"
+    rm -f "$INSTALL_PATH" "$STATE_FILE" "$SSH_CONF" /etc/portman/nftables-{ports,previous,pending}.conf
+    rmdir "${STATE_FILE%/*}/hy2" "${STATE_FILE%/*}" 2>/dev/null || true
+    rm -f "$ROUTE_MODULE" "$NFT_MODULE" "$HY2_MODULE"
     rmdir "${ROUTE_MODULE%/*}" 2>/dev/null || true
     info "portman 已卸载 (当前防火墙规则保持不变，但重启后不再恢复 portman 的 iptables/nftables 规则)"
     if [[ -f $SYSCTL_FILE ]]; then
@@ -2101,6 +2116,26 @@ nft_dispatch() {
     nft_dispatch_main "$action" "$@"
 }
 
+# 旧版更新器只替换主脚本和当时已有的模块。交互入口可按需补装。
+hy2_dispatch() (
+    if [[ ! -r $HY2_MODULE ]]; then
+        if [[ ${1:-} == restore ]]; then
+            error '缺少 HY2 模块，请执行 portman update'
+            return 1
+        fi
+        need_root || return 1
+        local tmp
+        tmp=$(mktemp) || return 1
+        trap 'rm -f "$tmp"' EXIT
+        fetch_script hy2-hop.sh "$tmp" &&
+            install -d -m 755 "${HY2_MODULE%/*}" &&
+            install -m 755 "$tmp" "$HY2_MODULE" || return 1
+    fi
+    # shellcheck source=hy2-hop.sh
+    source "$HY2_MODULE"
+    hy2_dispatch_main "$@"
+)
+
 # ===========================================================================
 # 7. 菜单与命令行
 # ===========================================================================
@@ -2149,9 +2184,13 @@ portman v${VERSION} - VPS 端口查看与管理工具
       portman route set suzhou ct IP 设置苏州电信测试 IP
       portman route help             路由检测的全部用法
 
+【HY2 端口跳跃】
+      portman hy2                    新增、更新、诊断和移除 HY2 节点
+      portman hy2 help               查看 HY2 子命令
+
 【维护】
   22. portman update                 更新到最新版本
-  23. portman uninstall              卸载 portman（不影响已有防火墙规则）
+  23. portman uninstall              卸载 portman（同时移除 Portman HY2 配置）
   24. portman version                查看当前版本
 
 端口写法:
@@ -2194,6 +2233,7 @@ menu() {
         echo "   9. 查看 IPv4 / IPv6 状态"
         echo "  10. 开启 / 关闭 IPv6"
         echo "  14. 三网路由检测 (NextTrace 中文报告)"
+        echo "  15. HY2 端口跳跃管理"
         menu_group "SSH"
         echo "  11. SSH 密钥登录 (写入公钥、只允许密钥登录)"
         menu_group "维护"
@@ -2202,7 +2242,7 @@ menu() {
         echo
         echo "   0. 退出"
         echo
-        read -rp "请选择 [0-14]: " c
+        read -rp "请选择 [0-15]: " c || return 0
         echo
         case $c in
             1)  show_ports all ;;
@@ -2226,6 +2266,7 @@ menu() {
                 fi ;;
             13) uninstall_self && exit 0 ;;
             14) route_dispatch menu; continue ;;
+            15) hy2_dispatch menu; continue ;;
             0|q) exit 0 ;;
             *)  error "无效选择" ;;
         esac
@@ -2235,7 +2276,7 @@ menu() {
 }
 
 main() {
-    [[ ${1:-} == uninstall || ${1:-} == restore || ${1:-} == nft-restore || ${1:-} == nft-rollback ]] || ensure_shortcuts
+    [[ ${1:-} == uninstall || ${1:-} == restore || ${1:-} == nft-restore || ${1:-} == nft-rollback || ${1:-} == hy2 ]] || ensure_shortcuts
     case ${1:-} in
         restore)         restore_rules ;;
         nft-restore)     nft_dispatch restore ;;
@@ -2272,6 +2313,7 @@ main() {
                 *)            ssh_menu ;;
             esac ;;
         route)           shift; route_dispatch "$@" ;;
+        hy2)             shift; hy2_dispatch "$@" ;;
         update)          update_self ;;
         uninstall)       uninstall_self ;;
         shortcut)        setup_shortcuts ;;

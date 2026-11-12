@@ -1,7 +1,7 @@
 name: Route diagnostics tests
 on:
   push:
-    branches: [feature/route-diagnostics, main]
+    branches: [feature/route-diagnostics, feat/hy2-port-hopping, main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -21,6 +21,12 @@ jobs:
         run: bash tests/test-route.sh
       - name: Native nftables regression (no real firewall changes)
         run: sudo bash tests/test-nft.sh
+      - name: Offline HY2 wizard and lifecycle regression
+        run: bash tests/test-hy2.sh
+      - name: HY2 IPv4 and IPv6 packet test in Linux network namespaces
+        run: |
+          command -v nft >/dev/null || (sudo apt-get update && sudo apt-get install -y nftables)
+          sudo bash tests/test-hy2-linux.sh
       - name: Missing-dependency installation regression tests
         run: sudo bash tests/test-deps.sh
       - name: Offline installer and updater integration test
@@ -41,5 +47,5 @@ jobs:
       - name: ShellCheck new module
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -S error route-report.sh
+            shellcheck -S error route-report.sh hy2-hop.sh
           fi

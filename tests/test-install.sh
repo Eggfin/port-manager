@@ -22,6 +22,9 @@ done
 case "$url" in
     */portman.sh) source_file=portman.sh;;
     */nft-backend.sh) source_file=nft-backend.sh;;
+    */hy2-hop.sh)
+        [[ ${FAKE_FAIL_HY2:-0} == 1 ]] && exit 22
+        source_file=hy2-hop.sh;;
     */route-report.sh)
         [[ ${FAKE_FAIL_MODULE:-0} == 1 ]] && exit 22
         source_file=route-report.sh;;
@@ -36,7 +39,8 @@ bash install.sh > "$temp/install.log"
 test -x /usr/local/bin/portman
 test -x /usr/local/lib/portman/route-report.sh
 test -x /usr/local/lib/portman/nft-backend.sh
-/usr/local/bin/portman version | grep -Fq 'v1.7.5'
+test -x /usr/local/lib/portman/hy2-hop.sh
+/usr/local/bin/portman version | grep -Fq 'v1.8.0'
 /usr/local/bin/portman route help > "$temp/route-help"
 grep -Fq '默认上海三网快速测试' "$temp/route-help"
 
@@ -46,11 +50,21 @@ rm -f /usr/local/lib/portman/route-report.sh
 test -x /usr/local/lib/portman/route-report.sh
 grep -Fq '路由模块已安装' "$temp/lazy-install.log"
 
+# 旧版更新器未分发 HY2 模块时，交互命令应自动补装。
+rm -f /usr/local/lib/portman/hy2-hop.sh
+/usr/local/bin/portman hy2 help | grep -Fq 'portman hy2'
+cmp /usr/local/lib/portman/hy2-hop.sh "$source_dir/hy2-hop.sh"
+
 # 中途下载失败不应更改已安装的主程序/模块
 if FAKE_FAIL_MODULE=1 /usr/local/bin/portman update > "$temp/fail.log" 2>&1; then
     echo 'FAILED: update should fail if module unavailable' >&2
     exit 1
 fi
+if FAKE_FAIL_HY2=1 /usr/local/bin/portman update > "$temp/fail-hy2.log" 2>&1; then
+    echo 'FAILED: update should fail if HY2 module unavailable' >&2
+    exit 1
+fi
+cmp -s /usr/local/lib/portman/hy2-hop.sh "$source_dir/hy2-hop.sh"
 cmp -s /usr/local/bin/portman "$source_dir/portman.sh"
 cmp -s /usr/local/lib/portman/route-report.sh "$source_dir/route-report.sh"
 cmp -s /usr/local/lib/portman/nft-backend.sh "$source_dir/nft-backend.sh"

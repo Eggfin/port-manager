@@ -7,6 +7,7 @@
 #   /usr/local/bin/portman                   主程序
 #   /usr/local/lib/portman/route-report.sh   三网路由检测模块
 #   /usr/local/lib/portman/nft-backend.sh     原生 nftables 后端
+#   /usr/local/lib/portman/hy2-hop.sh         HY2 端口跳跃管理
 
 set -e
 
@@ -15,6 +16,7 @@ RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 INSTALL_PATH="/usr/local/bin/portman"
 ROUTE_MODULE="/usr/local/lib/portman/route-report.sh"
 NFT_MODULE="/usr/local/lib/portman/nft-backend.sh"
+HY2_MODULE="/usr/local/lib/portman/hy2-hop.sh"
 
 if [[ -t 1 ]]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; PLAIN=$'\033[0m'
@@ -58,24 +60,20 @@ if ! has ss && ! has netstat; then
     fi
 fi
 
-tmp=$(mktemp)
-route_tmp=$(mktemp)
-nft_tmp=$(mktemp)
-trap 'rm -f "$tmp" "$route_tmp" "$nft_tmp"' EXIT
+temp=$(mktemp -d)
+trap 'rm -rf "$temp"' EXIT
 
-# 三个文件都下载并通过语法检查后才安装
 info "正在下载 portman..."
-download portman.sh "$tmp"
-download route-report.sh "$route_tmp"
-download nft-backend.sh "$nft_tmp"
-bash -n "$tmp"
-bash -n "$route_tmp"
-bash -n "$nft_tmp"
+for script in portman.sh route-report.sh nft-backend.sh hy2-hop.sh; do
+    download "$script" "$temp/$script"
+    bash -n "$temp/$script"
+done
 
 install -d -m 755 "${ROUTE_MODULE%/*}"
-install -m 755 "$route_tmp" "$ROUTE_MODULE"
-install -m 755 "$nft_tmp" "$NFT_MODULE"
-install -m 755 "$tmp" "$INSTALL_PATH"
+install -m 755 "$temp/route-report.sh" "$ROUTE_MODULE"
+install -m 755 "$temp/nft-backend.sh" "$NFT_MODULE"
+install -m 755 "$temp/hy2-hop.sh" "$HY2_MODULE"
+install -m 755 "$temp/portman.sh" "$INSTALL_PATH"
 
 info "安装完成: $("$INSTALL_PATH" version)"
 "$INSTALL_PATH" shortcut
@@ -97,4 +95,5 @@ cat <<'EOF'
  12. portman ssh           SSH 密钥登录：写入公钥、只允许密钥登录、查看状态
  13. portman route         默认上海三网回程检测，支持 MTR / 详细报告 / 保存文件
  14. portman help          查看全部命令和用法示例
+ 15. portman hy2           HY2 端口跳跃管理
 EOF
