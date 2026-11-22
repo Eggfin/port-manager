@@ -18,7 +18,7 @@
 # ===========================================================================
 # 1. 配置与通用函数
 # ===========================================================================
-VERSION="1.9.0"
+VERSION="1.9.1"
 REPO="Eggfin/port-manager"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 
@@ -2205,10 +2205,32 @@ reality_state_value() {
     awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$REALITY_STATE_FILE"
 }
 
-# 检查 REALITY 所需端口 (80/tcp HTTP-01, 443/tcp Xray) 的本机防火墙放行情况
+# 展示本机回环 HTTPS 端口状态 (仅 127.0.0.1 使用，无需在防火墙对公网放行)
+reality_local_port_line() {
+    local port=$1 procs="" listen_out=""
+    listen_out=$(collect_listen 2>/dev/null || true)
+    procs=$(awk -F'|' -v p="$port" '
+        $1 == "tcp" && $3 == p {
+            if (procs == "") procs = $4
+            else if (index("," procs ",", "," $4 ",") == 0) procs = procs "," $4
+        }
+        END { print procs }' <<<"$listen_out")
+    if [[ -z $procs ]]; then
+        printf '  %s✔%s TCP %-4s (本机回环 127.0.0.1):   仅本机使用，无需防火墙放行 (%s当前空闲%s)\n' \
+            "$GREEN" "$PLAIN" "$port" "$CYAN" "$PLAIN"
+    elif [[ $procs == *caddy* ]]; then
+        printf '  %s✔%s TCP %-4s (本机回环 127.0.0.1):   仅本机使用，无需防火墙放行 (%s已由 caddy 监听%s)\n' \
+            "$GREEN" "$PLAIN" "$port" "$GREEN" "$PLAIN"
+    else
+        printf '  %s!%s TCP %-4s (本机回环 127.0.0.1):   仅本机使用，无需防火墙放行 (%s当前被 %s 占用，部署时可改其他本机端口%s)\n' \
+            "$YELLOW" "$PLAIN" "$port" "$YELLOW" "$procs" "$PLAIN"
+    fi
+}
+
+# 检查 REALITY 所需端口 (80/tcp HTTP-01, 443/tcp Xray, 以及本机回环端口)
 #   $1: "" (仅检查) | --prompt (未放行时询问一键放行) | --open (自动放行)
 reality_check_ports() {
-    local mode=${1:-} fw st80 st443 ans
+    local mode=${1:-} fw st80 st443 ans local_port=""
     local -a missing=()
     local missing_csv=""
 
@@ -2216,6 +2238,9 @@ reality_check_ports() {
         warn "当前不是 root，无法准确检测本机防火墙状态 (请使用 sudo portman reality ports)"
         return 0
     fi
+
+    local_port=$(reality_state_value local_port 2>/dev/null || true)
+    local_port=${local_port:-8443}
 
     fw=$(detect_firewall)
     st80=$(fw_port_state "$fw" tcp 80)
@@ -2225,34 +2250,38 @@ reality_check_ports() {
     printf '  防火墙: %s\n' "$(firewall_name "$fw")"
     case $fw in
         none)
-            printf '  %s✔%s TCP 80  (HTTP-01 证书签发/续期): 无需本机放行\n' "$GREEN" "$PLAIN"
-            printf '  %s✔%s TCP 443 (Xray REALITY 入站):     无需本机放行\n' "$GREEN" "$PLAIN"
-            warn "云服务器请确认控制台「安全组」已放行 TCP 80 和 TCP 443"
+            printf '  %s✔%s TCP 80   (HTTP-01 证书签发/续期): 无需本机放行\n' "$GREEN" "$PLAIN"
+            printf '  %s✔%s TCP 443  (Xray REALITY 入站):     无需本机放行\n' "$GREEN" "$PLAIN"
+            reality_local_port_line "$local_port"
+            warn "云服务器请确认控制台「安全组」已放行 TCP 80 和 TCP 443 (无需放行 $local_port)"
             return 0 ;;
     esac
 
     if [[ $st80 == unmanaged || $st443 == unmanaged ]]; then
+        reality_local_port_line "$local_port"
         warn "检测到原生 nftables，但尚未启用 portman 白名单 (可能仅有 Fail2Ban 等其他表)"
         warn "请确认本机防火墙和云安全组已放行 TCP 80 (HTTP-01) 与 TCP 443 (Xray)"
         return 0
     fi
 
     if [[ $st80 == open ]]; then
-        printf '  %s✔%s TCP 80  (HTTP-01 证书签发/续期): %s已放行%s\n' "$GREEN" "$PLAIN" "$GREEN" "$PLAIN"
+        printf '  %s✔%s TCP 80   (HTTP-01 证书签发/续期): %s已放行%s\n' "$GREEN" "$PLAIN" "$GREEN" "$PLAIN"
     else
-        printf '  %s✘%s TCP 80  (HTTP-01 证书签发/续期): %s未放行%s\n' "$YELLOW" "$PLAIN" "$YELLOW" "$PLAIN"
+        printf '  %s✘%s TCP 80   (HTTP-01 证书签发/续期): %s未放行%s\n' "$YELLOW" "$PLAIN" "$YELLOW" "$PLAIN"
         missing+=(80)
     fi
 
     if [[ $st443 == open ]]; then
-        printf '  %s✔%s TCP 443 (Xray REALITY 入站):     %s已放行%s\n' "$GREEN" "$PLAIN" "$GREEN" "$PLAIN"
+        printf '  %s✔%s TCP 443  (Xray REALITY 入站):     %s已放行%s\n' "$GREEN" "$PLAIN" "$GREEN" "$PLAIN"
     else
-        printf '  %s✘%s TCP 443 (Xray REALITY 入站):     %s未放行%s\n' "$YELLOW" "$PLAIN" "$YELLOW" "$PLAIN"
+        printf '  %s✘%s TCP 443  (Xray REALITY 入站):     %s未放行%s\n' "$YELLOW" "$PLAIN" "$YELLOW" "$PLAIN"
         missing+=(443)
     fi
 
+    reality_local_port_line "$local_port"
+
     if (( ${#missing[@]} == 0 )); then
-        info "必需端口均已在当前防火墙放行 (云服务器仍需确认安全组已放行)"
+        info "公网必需端口均已在当前防火墙放行 (云服务器仍需确认安全组已放行 80 和 443)"
         return 0
     fi
 

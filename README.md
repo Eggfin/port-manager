@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/Eggfin/port-manager/main/install.sh
 直接运行 `portman`（或输入快捷键 `s`）进入交互菜单，按类别分组，输入数字选择功能：
 
 ```
-===== portman v1.9.0 · 端口查看与管理 =====
+===== portman v1.9.1 · 端口查看与管理 =====
 
   端口
    1. 查看所有端口 (正在监听 + 已放行未使用)

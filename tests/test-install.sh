@@ -44,7 +44,7 @@ test -x /usr/local/lib/portman/route-report.sh
 test -x /usr/local/lib/portman/nft-backend.sh
 test -x /usr/local/lib/portman/hy2-hop.sh
 test -x /usr/local/lib/portman/reality-site.sh
-/usr/local/bin/portman version | grep -Fq 'v1.9.0'
+/usr/local/bin/portman version | grep -Fq 'v1.9.1'
 /usr/local/bin/portman route help > "$temp/route-help"
 grep -Fq '默认上海三网快速测试' "$temp/route-help"
 

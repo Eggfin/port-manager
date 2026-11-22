@@ -97,8 +97,32 @@ ok "fw_port_state 正确解析单端口、端口范围和协议匹配"
     : > "$opened_log"
     reality_check_ports --open >/dev/null
     grep -Fxq '443|tcp' "$opened_log" || fail "仅 443 未放行时应只放行 443/tcp"
+
+    # 本机回环端口状态展示 (空闲 / caddy 监听 / 其他进程占用 / 自定义已部署端口)
+    fw_rule_list() { printf 'tcp:22\ntcp:80\ntcp:443\n'; }
+    REALITY_STATE_FILE="$temp/none.state"
+    collect_listen() { printf 'tcp|0.0.0.0|22|sshd(100)\n'; }
+    out_free=$(reality_check_ports)
+    grep -Fq 'TCP 8443' <<<"$out_free" || fail "应展示本机回环端口 8443"
+    grep -Fq '无需防火墙放行' <<<"$out_free" || fail "应说明 8443 无需防火墙放行"
+    grep -Fq '当前空闲' <<<"$out_free" || fail "未监听时应显示当前空闲"
+
+    collect_listen() { printf 'tcp|127.0.0.1|8443|caddy(500)\n'; }
+    out_caddy=$(reality_check_ports)
+    grep -Fq '已由 caddy 监听' <<<"$out_caddy" || fail "caddy 监听时应显示已由 caddy 监听"
+
+    collect_listen() { printf 'tcp|127.0.0.1|8443|nginx(600)\n'; }
+    out_busy=$(reality_check_ports)
+    grep -Fq '当前被 nginx(600) 占用' <<<"$out_busy" || fail "其他进程占用时应给出提示"
+
+    REALITY_STATE_FILE="$temp/custom.state"
+    printf 'domain=custom.example.com\nlocal_port=9443\nstatus=active\n' > "$REALITY_STATE_FILE"
+    collect_listen() { printf 'tcp|127.0.0.1|9443|caddy(700)\n'; }
+    out_custom=$(reality_check_ports)
+    grep -Fq 'TCP 9443' <<<"$out_custom" || fail "已部署自定义端口时应展示 9443"
+    grep -Fq '已由 caddy 监听' <<<"$out_custom" || fail "自定义端口被 caddy 监听时应显示已由 caddy 监听"
 )
-ok "reality_check_ports 自动检测与一键放行 (80/443) 正常"
+ok "reality_check_ports 自动检测、一键放行 (80/443) 与本机回环端口展示正常"
 
 # 5. reality_status 状态与 Caddyfile 篡改检测
 (
