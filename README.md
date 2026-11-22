@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/Eggfin/port-manager/main/install.sh
 直接运行 `portman`（或输入快捷键 `s`）进入交互菜单，按类别分组，输入数字选择功能：
 
 ```
-===== portman v1.7.5 · 端口查看与管理 =====
+===== portman v1.9.0 · 端口查看与管理 =====
 
   端口
    1. 查看所有端口 (正在监听 + 已放行未使用)
@@ -47,6 +47,8 @@ curl -fsSL https://raw.githubusercontent.com/Eggfin/port-manager/main/install.sh
    9. 查看 IPv4 / IPv6 状态
   10. 开启 / 关闭 IPv6
   14. 三网路由检测 (NextTrace 中文报告)
+  15. HY2 端口跳跃管理
+  16. REALITY 本机 HTTPS 网站 (Caddy + HTTP-01)
   SSH
   11. SSH 密钥登录 (写入公钥、只允许密钥登录)
   维护
@@ -92,6 +94,12 @@ curl -fsSL https://raw.githubusercontent.com/Eggfin/port-manager/main/install.sh
 | `portman route beijing --detail` | | 中文逐跳、IP、ASN、位置及延迟 |
 | `portman route mtr shanghai --save` | | 多次探测终点丢包/延迟波动，保存 TXT 和 JSON |
 | `portman route set suzhou ct IP` | | 保存苏州电信的测试目标（联通 cu、移动 cm） |
+| `portman hy2` | 15 | HY2 端口跳跃管理（新增/诊断/修复/回滚/移除） |
+| `portman reality` | 16 | REALITY 本机 HTTPS 网站管理菜单（Caddy + HTTP-01） |
+| `portman reality deploy` | 16 → 1 | 检测 80/443 端口（可一键放行）并部署/修复 REALITY 网站 |
+| `portman reality status` | 16 → 2 | 查看站点状态、3X-UI 参数、Caddy 服务与端口放行情况 |
+| `portman reality ports --open` | 16 → 3 | 检测并自动放行未开放的 TCP 80 / 443 端口 |
+| `portman reality logs [行数]` | 16 → 4 | 查看 Caddy 最近日志（默认 60 行） |
 
 ### SSH
 
@@ -258,6 +266,17 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Eggfin/port-manager/main/ins
 卸载整个 Portman 时也会清理 HY2 模块。手工服务、手工 NAT、SSH 与已有防火墙规则由各自的管理方式保留。重定向修改后，已建立的 UDP 映射随连接跟踪超时自然失效，验证时重新建立客户端连接。
 
 开发验证可运行 `bash tests/test-hy2.sh`。在一次性 Linux 测试机上用 `sudo bash tests/test-hy2-linux.sh` 验证 IPv4 / IPv6 UDP 回包、计数、规则恢复和卸载隔离。
+
+## REALITY 本机 HTTPS 网站
+
+整合自 `reality-site`，为 VLESS + REALITY 搭建本机 HTTPS 目标网站（`127.0.0.1:8443`），内置默认静态网页，由 Caddy 通过 HTTP-01 自动申请和续期证书。安装或运行 `sudo portman update` 后，在主菜单选 **16. REALITY 本机 HTTPS 网站**，或直接运行 `sudo portman reality`。
+
+- **端口自动检测与一键放行**：运行 `portman reality deploy` 或 `portman reality ports` 时，会自动检测本机防火墙中 **TCP 80**（HTTP-01 验证/续期临时使用，结束后释放）和 **TCP 443**（留给 Xray / 3X-UI 入站）的放行状态；如未放行，回车即可一键放行（也可直接执行 `sudo portman reality ports --open`）。云服务器仍需在控制台安全组中放行 TCP 80 和 443。
+- **与 `portman lockdown` 联动保护**：已部署站点（存在 `/etc/caddy/reality-site.state`）后，执行 `portman lockdown` 会自动保留 `tcp 80`，避免关闭其他端口影响证书自动续期。
+- **状态与日志**：`portman reality status` 查看域名、本机地址、3X-UI 填表参数（SNI / Target / Xver）、Caddyfile 完整性、Caddy 服务状态及端口放行情况；`portman reality logs` 查看 Caddy 日志。
+- **自定义网页**：部署成功后，将自己的静态网页上传到 `/var/www/reality-site/`（首页 `index.html`），仓库内的 [site/index.html](site/index.html) 为可编辑模板；修改网页无需重跑脚本或重启 Caddy。
+- **卸载安全**：卸载 `portman` 仅删除 `/usr/local/lib/portman/reality-site.sh` 模块脚本，不会删除已安装的 Caddy、证书或网站文件。
+- **系统适配**：要求 Linux（x86_64 / aarch64）与 systemd，支持 Ubuntu 20.04/22.04/24.04/26.04、Debian 11/12/13、CentOS Stream 9/10、AlmaLinux/Rocky/RHEL/Oracle Linux 8/9/10、Fedora 43/44/45。
 
 ## 注意
 

@@ -18,7 +18,7 @@
 # ===========================================================================
 # 1. 配置与通用函数
 # ===========================================================================
-VERSION="1.8.0"
+VERSION="1.9.0"
 REPO="Eggfin/port-manager"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main"
 
@@ -28,7 +28,13 @@ BIN_DIR="/usr/local/bin"
 ROUTE_MODULE="/usr/local/lib/portman/route-report.sh"
 NFT_MODULE="/usr/local/lib/portman/nft-backend.sh"
 HY2_MODULE="/usr/local/lib/portman/hy2-hop.sh"
+REALITY_MODULE="/usr/local/lib/portman/reality-site.sh"
 SHORTCUTS="s S"
+
+# REALITY 本机 HTTPS 网站路径 (允许测试通过环境变量覆盖)
+REALITY_STATE_FILE="${REALITY_STATE_FILE:-/etc/caddy/reality-site.state}"
+REALITY_CONFIG_FILE="${REALITY_CONFIG_FILE:-/etc/caddy/Caddyfile}"
+REALITY_WEBROOT="${REALITY_WEBROOT:-/var/www/reality-site}"
 
 # iptables 规则持久化: portman 添加的规则记录在 STATE_FILE，开机由 systemd 服务恢复
 STATE_FILE="/etc/portman/iptables.conf"
@@ -245,6 +251,34 @@ fw_rule_list() {
             fi
             ;;
     esac
+}
+
+# 检查指定协议/端口在当前防火墙中的放行状态: open | closed | unmanaged
+fw_port_state() {
+    local fw=$1 proto=$2 port=$3
+    case $fw in
+        none) echo open; return 0 ;;
+        nftables)
+            if ! (has nft && nft list table inet portman_filter >/dev/null 2>&1); then
+                echo unmanaged
+                return 0
+            fi ;;
+    esac
+    if fw_default_open "$fw"; then
+        echo open
+        return 0
+    fi
+    if fw_rule_list "$fw" | awk -F: -v p="$proto" -v n="$port" '
+        $1 == "any" || $1 == p {
+            if (index($2, "-")) { split($2, b, "-"); lo = b[1] + 0; hi = b[2] + 0 }
+            else { lo = $2 + 0; hi = $2 + 0 }
+            if (n + 0 >= lo && n + 0 <= hi) { ok = 1; exit }
+        }
+        END { exit(ok ? 0 : 1) }'; then
+        echo open
+    else
+        echo closed
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -683,6 +717,9 @@ keep_list() {
         collect_listen | awk -F'|' "$AWK_IS_LOCAL"' !is_local($2) { print $1, $3, $4 }'
         p=$(ssh_ports)
         for p in ${p:-22}; do echo "tcp $p SSH"; done
+        if [[ -f $REALITY_STATE_FILE ]]; then
+            echo "tcp 80 REALITY-HTTP-01"
+        fi
     } | awk '!seen[$1 " " $2]++' | sort -k2,2n -k1,1
 }
 
@@ -2023,7 +2060,7 @@ update_self() (
     info "正在下载最新版本..."
     # 下载并校验全部脚本后再替换已安装文件。
     local script
-    for script in portman.sh route-report.sh nft-backend.sh hy2-hop.sh; do
+    for script in portman.sh route-report.sh nft-backend.sh hy2-hop.sh reality-site.sh; do
         if ! fetch_script "$script" "$temp/$script"; then
             error "下载或语法检查失败，未完成更新: $script"
             return 1
@@ -2032,6 +2069,7 @@ update_self() (
     install_route_module "$temp/route-report.sh" &&
         install -m 755 "$temp/nft-backend.sh" "$NFT_MODULE" &&
         install -m 755 "$temp/hy2-hop.sh" "$HY2_MODULE" &&
+        install -m 755 "$temp/reality-site.sh" "$REALITY_MODULE" &&
         install -m 755 "$temp/portman.sh" "$INSTALL_PATH" || return 1
 
     "$INSTALL_PATH" shortcut >/dev/null
@@ -2063,11 +2101,14 @@ uninstall_self() {
     systemctl daemon-reload >/dev/null 2>&1 || true
     rm -f "$INSTALL_PATH" "$STATE_FILE" "$SSH_CONF" /etc/portman/nftables-{ports,previous,pending}.conf
     rmdir "${STATE_FILE%/*}/hy2" "${STATE_FILE%/*}" 2>/dev/null || true
-    rm -f "$ROUTE_MODULE" "$NFT_MODULE" "$HY2_MODULE"
+    rm -f "$ROUTE_MODULE" "$NFT_MODULE" "$HY2_MODULE" "$REALITY_MODULE"
     rmdir "${ROUTE_MODULE%/*}" 2>/dev/null || true
     info "portman 已卸载 (当前防火墙规则保持不变，但重启后不再恢复 portman 的 iptables/nftables 规则)"
     if [[ -f $SYSCTL_FILE ]]; then
         warn "IPv6 仍保持禁用。如需恢复，删除 $SYSCTL_FILE 后重启"
+    fi
+    if [[ -f $REALITY_STATE_FILE ]]; then
+        warn "已部署的 REALITY 本机网站 (Caddy 配置、证书及 $REALITY_WEBROOT) 已保留"
     fi
 }
 
@@ -2137,6 +2178,273 @@ hy2_dispatch() (
 )
 
 # ===========================================================================
+# REALITY 本机 HTTPS 网站模块 (独立子进程调用 reality-site.sh)
+# ===========================================================================
+reality_ensure_module() {
+    if [[ -r $REALITY_MODULE ]]; then
+        return 0
+    fi
+    need_root || return 1
+    local tmp
+    tmp=$(mktemp) || return 1
+    info "首次使用 REALITY 网站部署，正在补装官方仓库中的模块..."
+    if fetch_script reality-site.sh "$tmp"; then
+        install -d -m 755 "${REALITY_MODULE%/*}"
+        install -m 755 "$tmp" "$REALITY_MODULE"
+        rm -f "$tmp"
+        info "REALITY 网站模块已安装"
+    else
+        rm -f "$tmp"
+        error "REALITY 网站模块下载或校验失败，请重试或执行 portman update"
+        return 1
+    fi
+}
+
+reality_state_value() {
+    [[ -r $REALITY_STATE_FILE ]] || return 1
+    awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$REALITY_STATE_FILE"
+}
+
+# 检查 REALITY 所需端口 (80/tcp HTTP-01, 443/tcp Xray) 的本机防火墙放行情况
+#   $1: "" (仅检查) | --prompt (未放行时询问一键放行) | --open (自动放行)
+reality_check_ports() {
+    local mode=${1:-} fw st80 st443 ans
+    local -a missing=()
+    local missing_csv=""
+
+    if ! is_root; then
+        warn "当前不是 root，无法准确检测本机防火墙状态 (请使用 sudo portman reality ports)"
+        return 0
+    fi
+
+    fw=$(detect_firewall)
+    st80=$(fw_port_state "$fw" tcp 80)
+    st443=$(fw_port_state "$fw" tcp 443)
+
+    title "REALITY 必需端口检测"
+    printf '  防火墙: %s\n' "$(firewall_name "$fw")"
+    case $fw in
+        none)
+            printf '  %s✔%s TCP 80  (HTTP-01 证书签发/续期): 无需本机放行\n' "$GREEN" "$PLAIN"
+            printf '  %s✔%s TCP 443 (Xray REALITY 入站):     无需本机放行\n' "$GREEN" "$PLAIN"
+            warn "云服务器请确认控制台「安全组」已放行 TCP 80 和 TCP 443"
+            return 0 ;;
+    esac
+
+    if [[ $st80 == unmanaged || $st443 == unmanaged ]]; then
+        warn "检测到原生 nftables，但尚未启用 portman 白名单 (可能仅有 Fail2Ban 等其他表)"
+        warn "请确认本机防火墙和云安全组已放行 TCP 80 (HTTP-01) 与 TCP 443 (Xray)"
+        return 0
+    fi
+
+    if [[ $st80 == open ]]; then
+        printf '  %s✔%s TCP 80  (HTTP-01 证书签发/续期): %s已放行%s\n' "$GREEN" "$PLAIN" "$GREEN" "$PLAIN"
+    else
+        printf '  %s✘%s TCP 80  (HTTP-01 证书签发/续期): %s未放行%s\n' "$YELLOW" "$PLAIN" "$YELLOW" "$PLAIN"
+        missing+=(80)
+    fi
+
+    if [[ $st443 == open ]]; then
+        printf '  %s✔%s TCP 443 (Xray REALITY 入站):     %s已放行%s\n' "$GREEN" "$PLAIN" "$GREEN" "$PLAIN"
+    else
+        printf '  %s✘%s TCP 443 (Xray REALITY 入站):     %s未放行%s\n' "$YELLOW" "$PLAIN" "$YELLOW" "$PLAIN"
+        missing+=(443)
+    fi
+
+    if (( ${#missing[@]} == 0 )); then
+        info "必需端口均已在当前防火墙放行 (云服务器仍需确认安全组已放行)"
+        return 0
+    fi
+
+    missing_csv=$(IFS=,; echo "${missing[*]}")
+    case $mode in
+        --open)
+            info "正在自动放行未开放的端口: ${missing_csv}/tcp ..."
+            open_port "$missing_csv" tcp ;;
+        --prompt)
+            echo
+            read -rp "检测到必需端口未放行 (${missing_csv}/tcp)，是否立即一键放行? [Y/n]: " ans
+            if [[ -z $ans || $ans == [yY] ]]; then
+                open_port "$missing_csv" tcp
+            else
+                warn "已跳过放行；TCP 80 未放行可能导致 HTTP-01 证书申请或续期失败"
+            fi ;;
+        *)
+            warn "可运行 portman reality ports --open 一键放行 (${missing_csv}/tcp)" ;;
+    esac
+}
+
+reality_status() {
+    local domain="" local_port="" email="" cert_mode="" status="" saved_sha="" cur_sha=""
+    local caddy_ver="" svc_state="" svc_enabled=""
+
+    title "REALITY 本机 HTTPS 网站状态"
+    if [[ -f $REALITY_STATE_FILE ]]; then
+        domain=$(reality_state_value domain || true)
+        local_port=$(reality_state_value local_port || true)
+        email=$(reality_state_value email || true)
+        cert_mode=$(reality_state_value cert_mode || true)
+        status=$(reality_state_value status || true)
+        saved_sha=$(reality_state_value config_sha256 || true)
+
+        printf '  部署状态:   %s%s%s\n' "$GREEN" "${status:-unknown}" "$PLAIN"
+        printf '  网站域名:   %s\n' "${domain:-未记录}"
+        printf '  本机地址:   127.0.0.1:%s\n' "${local_port:-8443}"
+        printf '  证书模式:   %s (%s)\n' "${cert_mode:-http}" "${email:-未填写邮箱}"
+        printf '  网页目录:   %s' "$REALITY_WEBROOT"
+        if [[ -f "$REALITY_WEBROOT/index.html" ]]; then
+            printf ' (%s已就绪%s)\n' "$GREEN" "$PLAIN"
+        else
+            printf ' (%s缺少 index.html%s)\n' "$YELLOW" "$PLAIN"
+        fi
+
+        if [[ -f $REALITY_CONFIG_FILE ]]; then
+            if has sha256sum; then
+                cur_sha=$(sha256sum "$REALITY_CONFIG_FILE" | awk '{print $1}')
+            elif has shasum; then
+                cur_sha=$(shasum -a 256 "$REALITY_CONFIG_FILE" | awk '{print $1}')
+            fi
+            if [[ -n $saved_sha && -n $cur_sha && $cur_sha != "$saved_sha" ]]; then
+                printf '  Caddyfile:  %s已被手工修改%s (%s)\n' "$YELLOW" "$PLAIN" "$REALITY_CONFIG_FILE"
+            else
+                printf '  Caddyfile:  %s正常%s (%s)\n' "$GREEN" "$PLAIN" "$REALITY_CONFIG_FILE"
+            fi
+        else
+            printf '  Caddyfile:  %s缺失%s (%s)\n' "$RED" "$PLAIN" "$REALITY_CONFIG_FILE"
+        fi
+
+        if [[ -n $domain && -n $local_port ]]; then
+            echo
+            printf '  %s3X-UI 参考配置:%s\n' "$BOLD" "$PLAIN"
+            printf '    SNI:         %s\n' "$domain"
+            printf '    Target/Dest: 127.0.0.1:%s\n' "$local_port"
+            printf '    Xver:        0\n'
+        fi
+    else
+        printf '  部署状态:   %s尚未通过本工具部署%s (未找到 %s)\n' "$YELLOW" "$PLAIN" "$REALITY_STATE_FILE"
+    fi
+
+    echo
+    if has caddy; then
+        caddy_ver=$(caddy version 2>/dev/null | head -n 1 || true)
+        printf '  Caddy 程序: %s\n' "${caddy_ver:-已安装}"
+    else
+        printf '  Caddy 程序: %s未安装%s\n' "$YELLOW" "$PLAIN"
+    fi
+
+    if has systemctl && [[ -d /run/systemd/system ]]; then
+        svc_state=$(systemctl is-active caddy 2>/dev/null || true)
+        svc_enabled=$(systemctl is-enabled caddy 2>/dev/null || true)
+        printf '  Caddy 服务: %s (开机自启: %s)\n' "${svc_state:-inactive}" "${svc_enabled:-disabled}"
+    fi
+
+    echo
+    reality_check_ports
+    echo
+    info "查看 Caddy 日志: portman reality logs  (或 journalctl -u caddy -n 60 --no-pager)"
+}
+
+reality_logs() {
+    local lines=${1:-60}
+    [[ $lines =~ ^[0-9]+$ ]] || { error "行数必须为正整数"; return 1; }
+    if ! has journalctl; then
+        error "未找到 journalctl，无法读取 Caddy 日志"
+        return 1
+    fi
+    journalctl -u caddy -n "$lines" --no-pager
+}
+
+reality_deploy() {
+    need_root || return 1
+    reality_ensure_module || return 1
+    reality_check_ports --prompt
+    echo
+    local rc=0
+    bash "$REALITY_MODULE" --deploy || rc=$?
+    return "$rc"
+}
+
+reality_usage() {
+    cat <<'EOF'
+REALITY 本机 HTTPS 网站管理 (Caddy + HTTP-01)
+
+用法:
+  portman reality               打开 REALITY 网站管理菜单
+  portman reality deploy        检测端口并运行部署/修复向导 (默认自动提示一键放行 80/443)
+  portman reality status        查看站点部署状态、3X-UI 参数、Caddy 服务和端口放行情况
+  portman reality ports         检测 TCP 80 / 443 本机防火墙放行情况
+  portman reality ports --open  自动放行未开放的 TCP 80 / 443 端口
+  portman reality logs [行数]   查看 Caddy 最近日志 (默认 60 行)
+  portman reality help          显示本帮助
+
+说明:
+  - 部署完成后，portman lockdown 会自动识别 /etc/caddy/reality-site.state 并保留 TCP 80
+  - 自定义网页请上传到 /var/www/reality-site/ (首页 index.html)，无需重跑脚本
+EOF
+}
+
+reality_menu() {
+    local c
+    while true; do
+        clear 2>/dev/null
+        menu_title "REALITY 本机 HTTPS 网站 (Caddy + HTTP-01)"
+        echo
+        echo "   1. 部署 / 修复 REALITY 本机网站 (自动检测并可一键放行所需端口)"
+        echo "   2. 查看站点状态、3X-UI 参数与端口放行情况"
+        echo "   3. 检测并一键放行所需端口 (TCP 80 / 443)"
+        echo "   4. 查看 Caddy 最近日志"
+        echo
+        echo "   0. 返回主菜单"
+        echo
+        read -rp "请选择 [0-4]: " c || return 0
+        echo
+        case $c in
+            1) reality_deploy || true ;;
+            2) reality_status || true ;;
+            3) reality_check_ports --prompt || true ;;
+            4) reality_logs 60 || true ;;
+            0|q) return 0 ;;
+            *) error "无效选择" ;;
+        esac
+        echo
+        pause
+    done
+}
+
+reality_dispatch() {
+    case ${1:-menu} in
+        menu|"")
+            reality_ensure_module || return 1
+            reality_menu ;;
+        deploy|--deploy)
+            reality_deploy ;;
+        status)
+            reality_status ;;
+        ports)
+            shift
+            if [[ ${1:-} == --open || ${1:-} == open ]]; then
+                need_root || return 1
+                reality_check_ports --open
+            elif [[ ${1:-} == --prompt ]]; then
+                need_root || return 1
+                reality_check_ports --prompt
+            else
+                reality_check_ports
+            fi ;;
+        logs|log)
+            reality_logs "${2:-60}" ;;
+        help|-h|--help)
+            reality_ensure_module || return 1
+            reality_usage ;;
+        *)
+            error "未知子命令: $1"
+            echo
+            reality_usage
+            return 1 ;;
+    esac
+}
+
+# ===========================================================================
 # 7. 菜单与命令行
 # ===========================================================================
 usage() {
@@ -2188,6 +2496,13 @@ portman v${VERSION} - VPS 端口查看与管理工具
       portman hy2                    新增、更新、诊断和移除 HY2 节点
       portman hy2 help               查看 HY2 子命令
 
+【REALITY 本机网站】
+      portman reality                REALITY 本机 HTTPS 网站管理菜单 (Caddy + HTTP-01)
+      portman reality deploy         检测端口并部署/修复 REALITY 网站
+      portman reality status         查看站点状态、3X-UI 参数与端口放行情况
+      portman reality ports [--open] 检测或一键放行 TCP 80 / 443
+      portman reality logs [行数]    查看 Caddy 日志
+
 【维护】
   22. portman update                 更新到最新版本
   23. portman uninstall              卸载 portman（同时移除 Portman HY2 配置）
@@ -2234,6 +2549,7 @@ menu() {
         echo "  10. 开启 / 关闭 IPv6"
         echo "  14. 三网路由检测 (NextTrace 中文报告)"
         echo "  15. HY2 端口跳跃管理"
+        echo "  16. REALITY 本机 HTTPS 网站 (Caddy + HTTP-01)"
         menu_group "SSH"
         echo "  11. SSH 密钥登录 (写入公钥、只允许密钥登录)"
         menu_group "维护"
@@ -2242,7 +2558,7 @@ menu() {
         echo
         echo "   0. 退出"
         echo
-        read -rp "请选择 [0-15]: " c || return 0
+        read -rp "请选择 [0-16]: " c || return 0
         echo
         case $c in
             1)  show_ports all ;;
@@ -2267,6 +2583,7 @@ menu() {
             13) uninstall_self && exit 0 ;;
             14) route_dispatch menu; continue ;;
             15) hy2_dispatch menu; continue ;;
+            16) reality_dispatch menu; continue ;;
             0|q) exit 0 ;;
             *)  error "无效选择" ;;
         esac
@@ -2314,6 +2631,7 @@ main() {
             esac ;;
         route)           shift; route_dispatch "$@" ;;
         hy2)             shift; hy2_dispatch "$@" ;;
+        reality)         shift; reality_dispatch "$@" ;;
         update)          update_self ;;
         uninstall)       uninstall_self ;;
         shortcut)        setup_shortcuts ;;

@@ -6,8 +6,9 @@
 # 安装内容:
 #   /usr/local/bin/portman                   主程序
 #   /usr/local/lib/portman/route-report.sh   三网路由检测模块
-#   /usr/local/lib/portman/nft-backend.sh     原生 nftables 后端
-#   /usr/local/lib/portman/hy2-hop.sh         HY2 端口跳跃管理
+#   /usr/local/lib/portman/nft-backend.sh    原生 nftables 后端
+#   /usr/local/lib/portman/hy2-hop.sh        HY2 端口跳跃管理
+#   /usr/local/lib/portman/reality-site.sh   REALITY 本机 HTTPS 网站部署
 
 set -e
 
@@ -17,6 +18,7 @@ INSTALL_PATH="/usr/local/bin/portman"
 ROUTE_MODULE="/usr/local/lib/portman/route-report.sh"
 NFT_MODULE="/usr/local/lib/portman/nft-backend.sh"
 HY2_MODULE="/usr/local/lib/portman/hy2-hop.sh"
+REALITY_MODULE="/usr/local/lib/portman/reality-site.sh"
 
 if [[ -t 1 ]]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; PLAIN=$'\033[0m'
@@ -64,7 +66,7 @@ temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
 
 info "正在下载 portman..."
-for script in portman.sh route-report.sh nft-backend.sh hy2-hop.sh; do
+for script in portman.sh route-report.sh nft-backend.sh hy2-hop.sh reality-site.sh; do
     download "$script" "$temp/$script"
     bash -n "$temp/$script"
 done
@@ -73,6 +75,7 @@ install -d -m 755 "${ROUTE_MODULE%/*}"
 install -m 755 "$temp/route-report.sh" "$ROUTE_MODULE"
 install -m 755 "$temp/nft-backend.sh" "$NFT_MODULE"
 install -m 755 "$temp/hy2-hop.sh" "$HY2_MODULE"
+install -m 755 "$temp/reality-site.sh" "$REALITY_MODULE"
 install -m 755 "$temp/portman.sh" "$INSTALL_PATH"
 
 info "安装完成: $("$INSTALL_PATH" version)"
@@ -96,4 +99,5 @@ cat <<'EOF'
  13. portman route         默认上海三网回程检测，支持 MTR / 详细报告 / 保存文件
  14. portman help          查看全部命令和用法示例
  15. portman hy2           HY2 端口跳跃管理
+ 16. portman reality       REALITY 本机 HTTPS 网站部署 (Caddy + HTTP-01)
 EOF

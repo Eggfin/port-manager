@@ -23,6 +23,8 @@ jobs:
         run: sudo bash tests/test-nft.sh
       - name: Offline HY2 wizard and lifecycle regression
         run: bash tests/test-hy2.sh
+      - name: Offline REALITY site integration regression
+        run: bash tests/test-reality.sh
       - name: HY2 IPv4 and IPv6 packet test in Linux network namespaces
         run: |
           command -v nft >/dev/null || (sudo apt-get update && sudo apt-get install -y nftables)
@@ -47,5 +49,5 @@ jobs:
       - name: ShellCheck new module
         run: |
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -S error route-report.sh hy2-hop.sh
+            shellcheck -S error route-report.sh hy2-hop.sh reality-site.sh
           fi

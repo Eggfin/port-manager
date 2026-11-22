@@ -2,6 +2,18 @@
 
 本文件记录 `Eggfin/port-manager` 的主要版本变更。已有功能保持兼容；网络路由检测只读，不修改防火墙或 SSH 设置。
 
+## v1.9.0 — 2026-11-22
+
+### 新增
+- **集成 REALITY 本机 HTTPS 网站部署模块**：将 `reality-site.sh`（Caddy + HTTP-01 自动管理证书）整合为独立模块 `/usr/local/lib/portman/reality-site.sh`，主菜单「网络」新增第 **16** 项，并提供 `portman reality` 子命令（`deploy`、`status`、`ports`、`logs`、`help`）；同步收录可编辑网页模板 `site/index.html`。
+- **必需端口自动检测与一键放行**：进入部署或运行 `portman reality ports` 时，自动检测本机防火墙对 **TCP 80**（HTTP-01 证书签发/续期）和 **TCP 443**（Xray REALITY 入站）的放行状态；如未放行，支持回车一键放行或 `portman reality ports --open` 自动放行。
+- **lockdown 自动保护 HTTP-01 端口**：执行 `portman lockdown`（UFW / firewalld / iptables / 原生 nftables 全部后端）时，若检测到已部署 `/etc/caddy/reality-site.state`，自动保留 `tcp 80`，避免关闭其他端口导致证书续期失败。
+- **轻量站点状态与日志查看**：`portman reality status` 一览部署域名、本机端口、3X-UI 对应参数（SNI / Target / Xver）、Caddyfile 完整性、Caddy 服务与端口状态；`portman reality logs` 快速查看 Caddy 日志。
+
+### 维护与测试
+- 安装脚本 `install.sh` 与 `portman update` 同步分发和校验 `reality-site.sh`；从旧版本升级后首次调用 `portman reality` 会自动补装模块；卸载 `portman` 时仅清理模块脚本，保留用户已部署的 Caddy、证书及 `/var/www/reality-site/` 网页文件。
+- 新增离线回归测试 `tests/test-reality.sh`，并更新 `tests/test-install.sh` 和 GitHub Actions 工作流（含 ShellCheck 校验）。
+
 ## v1.8.0 — 2026-11-13
 
 - **HY2 端口跳跃管理**。主菜单新增向导，支持多节点、IPv4 / IPv6、UDP 监听检测、端口冲突检查和客户端配置片段。
