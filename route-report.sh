@@ -28,6 +28,7 @@ ROUTE_INSTALLER_URLS=(
     https://raw.githubusercontent.com/nxtrace/NTrace-core/main/nt_install.sh
 )
 ROUTE_TIMEOUT=180   # 单个目标的最长探测时间 (秒)
+ROUTE_MIN_NT_VERSION="1.7.4"   # NextTrace 从 v1.7.4 起支持 -r --json (MTR JSON v1)
 
 if [[ -t 1 ]]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
@@ -149,32 +150,87 @@ route_set_target() {
 # ===========================================================================
 # 3. 依赖检测与安装 (NextTrace / jq)
 # ===========================================================================
-route_find_nexttrace() {
-    local p
-    p=$(command -v nexttrace 2>/dev/null) || p=""
-    if [[ -n $p ]]; then
-        printf '%s\n' "$p"
+# 从 `nexttrace --version` 提取语义版本号 (如 1.7.6)；无法识别 (如 dev/测试替身) 时返回 1
+route_nt_version() {
+    local bin=$1 out first
+    out=$("$bin" --version 2>&1) || true
+    first=${out%%$'\n'*}
+    first=$(printf '%s\n' "$first" | sed $'s/\033\\[[0-9;]*[[:alpha:]]//g')
+    if [[ $first =~ [Nn]ext[Tt]race[[:space:]]+v?([0-9]+)\.([0-9]+)\.([0-9]+)([^0-9.]|$) ]]; then
+        printf '%s.%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
         return 0
     fi
-    for p in /usr/local/bin/nexttrace /usr/bin/nexttrace "${HOME:-/root}/.local/bin/nexttrace"; do
-        if [[ -x $p ]]; then
+    return 1
+}
+
+# 比较语义版本号: $1 >= $2 (格式 X.Y.Z)
+route_ver_ge() {
+    local a1 a2 a3 b1 b2 b3
+    IFS=. read -r a1 a2 a3 <<<"$1"
+    IFS=. read -r b1 b2 b3 <<<"$2"
+    a1=$((10#${a1:-0})); a2=$((10#${a2:-0})); a3=$((10#${a3:-0}))
+    b1=$((10#${b1:-0})); b2=$((10#${b2:-0})); b3=$((10#${b3:-0}))
+    (( a1 > b1 )) && return 0
+    (( a1 < b1 )) && return 1
+    (( a2 > b2 )) && return 0
+    (( a2 < b2 )) && return 1
+    (( a3 >= b3 ))
+}
+
+# 检查 NextTrace 是否满足最低版本要求。
+# 能解析出版本且 < ROUTE_MIN_NT_VERSION 时返回 1；>= 最低版本或 dev/测试替身返回 0。
+route_nt_ver_ok() {
+    local ver
+    ver=$(route_nt_version "$1") || return 0
+    route_ver_ge "$ver" "$ROUTE_MIN_NT_VERSION"
+}
+
+route_find_nexttrace() {
+    local p cmd_p fallback="" seen=":"
+    local -a candidates=()
+    cmd_p=$(command -v nexttrace 2>/dev/null) || cmd_p=""
+    [[ -n $cmd_p ]] && candidates+=("$cmd_p")
+    candidates+=(/usr/local/bin/nexttrace /usr/bin/nexttrace "${HOME:-/root}/.local/bin/nexttrace")
+
+    for p in "${candidates[@]}"; do
+        [[ -n $p && -x $p ]] || continue
+        [[ $seen == *":$p:"* ]] && continue
+        seen+="$p:"
+        if route_nt_ver_ok "$p"; then
             printf '%s\n' "$p"
             return 0
         fi
+        [[ -z $fallback ]] && fallback=$p
     done
+    if [[ -n $fallback ]]; then
+        printf '%s\n' "$fallback"
+        return 0
+    fi
     return 1
 }
 
 route_doctor() {
-    local nt jq_path
+    local nt jq_path nt_ok=0 nt_ver cmd_nt cmd_ver
     printf '\n%s===== 路由检测 · 依赖诊断 =====%s\n' "$BOLD" "$PLAIN"
     printf '系统: %s / %s\n' "$(uname -s)" "$(uname -m)"
     printf 'PATH: %s\n' "$PATH"
 
     nt=$(route_find_nexttrace) || nt=""
     if [[ -n $nt ]]; then
-        printf '%s[正常]%s NextTrace: %s\n' "$GREEN" "$PLAIN" "$nt"
-        "$nt" --version 2>&1 | head -n 2
+        if route_nt_ver_ok "$nt"; then
+            nt_ok=1
+            printf '%s[正常]%s NextTrace: %s\n' "$GREEN" "$PLAIN" "$nt"
+            "$nt" --version 2>&1 | head -n 2
+            cmd_nt=$(command -v nexttrace 2>/dev/null) || cmd_nt=""
+            if [[ -n $cmd_nt && $cmd_nt != "$nt" ]] && ! route_nt_ver_ok "$cmd_nt"; then
+                cmd_ver=$(route_nt_version "$cmd_nt" || true)
+                printf '%s[提示]%s PATH 中的 %s 版本过旧 (v%s)，已自动改用 %s\n' "$YELLOW" "$PLAIN" "$cmd_nt" "$cmd_ver" "$nt"
+            fi
+        else
+            nt_ver=$(route_nt_version "$nt" || true)
+            printf '%s[过旧]%s NextTrace: %s（当前 v%s，需要 v%s+ 以支持 -r --json）\n' "$YELLOW" "$PLAIN" "$nt" "$nt_ver" "$ROUTE_MIN_NT_VERSION"
+            "$nt" --version 2>&1 | head -n 2
+        fi
     else
         printf '%s[缺失]%s NextTrace: 未找到可执行文件\n' "$RED" "$PLAIN"
     fi
@@ -187,20 +243,24 @@ route_doctor() {
         printf '%s[缺失]%s jq: 未找到可执行文件\n' "$RED" "$PLAIN"
     fi
 
-    if [[ -n $nt && -n $jq_path ]]; then
+    if [[ -n $nt && $nt_ok == 1 && -n $jq_path ]]; then
         route_note '依赖检查通过，可以开始检测。'
         return 0
     fi
-    route_note '检测依赖未就绪，可运行 portman route install 或选择子菜单 10。'
+    route_note '检测依赖未就绪或版本过旧，可运行 portman route install 或选择子菜单 10。'
     return 1
 }
 
 # 检测前确认依赖齐全，并把 NextTrace 路径存入 ROUTE_NT_BIN
 route_require() {
-    local missing=0
+    local missing=0 nt_ver
     ROUTE_NT_BIN=$(route_find_nexttrace) || ROUTE_NT_BIN=""
     if [[ -z $ROUTE_NT_BIN ]]; then
         route_err 'NextTrace 未找到（不是线路故障）；运行 portman route install 修复。'
+        missing=1
+    elif ! route_nt_ver_ok "$ROUTE_NT_BIN"; then
+        nt_ver=$(route_nt_version "$ROUTE_NT_BIN" || true)
+        route_err "NextTrace 版本过旧（当前 v${nt_ver}，需要 v${ROUTE_MIN_NT_VERSION}+ 以支持 -r --json）；运行 portman route install 或选择子菜单 10 升级。"
         missing=1
     fi
     if ! has jq; then
@@ -252,11 +312,22 @@ route_pkg_install() {
 route_found() { if [[ -n $1 ]]; then echo 已找到; else echo 缺失; fi; }
 
 route_install_deps() {
-    local answer installer rc=0 nt jq_path
+    local answer installer rc=0 nt jq_path nt_need=0 nt_status nt_ver
     nt=$(route_find_nexttrace) || nt=""
     jq_path=$(command -v jq 2>/dev/null) || jq_path=""
-    route_note "当前状态：NextTrace=$(route_found "$nt")；jq=$(route_found "$jq_path")"
-    if [[ -n $nt && -n $jq_path ]]; then
+    if [[ -z $nt ]]; then
+        nt_need=1
+        nt_status='缺失'
+    elif ! route_nt_ver_ok "$nt"; then
+        nt_need=1
+        nt_ver=$(route_nt_version "$nt" || true)
+        nt_status="版本过旧 (v${nt_ver}，需 v${ROUTE_MIN_NT_VERSION}+)"
+    else
+        nt_status='已找到'
+    fi
+
+    route_note "当前状态：NextTrace=${nt_status}；jq=$(route_found "$jq_path")"
+    if (( nt_need == 0 )) && [[ -n $jq_path ]]; then
         route_note '依赖已齐全，无需重复安装。'
         return 0
     fi
@@ -266,7 +337,7 @@ route_install_deps() {
     fi
 
     route_note '安装将使用系统包管理器（jq）及 NextTrace 官方安装脚本（--system）。'
-    read -rp '确认安装缺失依赖？请输入 y 继续 [y/N]: ' answer || answer=""
+    read -rp '确认安装或升级检测依赖？请输入 y 继续 [y/N]: ' answer || answer=""
     case $answer in
         y|Y|yes|YES) ;;
         *) route_note '未执行安装（已取消）。'; return 1 ;;
@@ -282,14 +353,14 @@ route_install_deps() {
         route_note "jq 安装完成：$(command -v jq)"
     fi
 
-    if [[ -z $nt ]]; then
+    if (( nt_need == 1 )); then
         installer=$(mktemp) || { route_err '无法创建临时文件'; return 1; }
         route_note '正在下载 NextTrace 官方安装器...'
         if ! route_fetch_installer "$installer"; then
             rm -f "$installer"
             return 1
         fi
-        route_note '正在安装 NextTrace 到 /usr/local/bin（系统模式）...'
+        route_note '正在安装 / 升级 NextTrace 到 /usr/local/bin（系统模式）...'
         # 先下载到文件再执行，保留真实退出码，避免「下载失败 | bash 返回成功」
         if ! sh "$installer" --system; then
             rm -f "$installer"
@@ -299,9 +370,9 @@ route_install_deps() {
         rm -f "$installer"
     fi
 
-    # 重新检查安装位置和可执行性，防止「提示成功但找不到命令」
+    # 重新检查安装位置、版本和可执行性，防止「提示成功但找不到命令或仍是旧版」
     if ! route_require; then
-        route_err '安装过程结束，但依赖仍未齐全。执行 portman route doctor 查看路径。'
+        route_err '安装过程结束，但依赖仍未齐全或版本仍过旧。执行 portman route doctor 查看路径。'
         return 1
     fi
     route_note '全部依赖安装并验证成功！'
@@ -517,10 +588,18 @@ route_probe_one() {
     "${cmd[@]}" >"$raw" 2>"$err" || code=$?
 
     if ! route_json_valid "$raw"; then
+        local reason='NextTrace 未输出有效 JSON' old_mtr_json=0
+        if grep -Eq -- '--mtr.*--json|--json.*--mtr' "$err" "$raw" 2>/dev/null; then
+            reason="NextTrace 版本过旧（需 v${ROUTE_MIN_NT_VERSION}+）"
+            old_mtr_json=1
+        fi
         if [[ $summary_file != '-' ]]; then
-            printf '%s | 失败 | — | NextTrace 未输出有效 JSON\n' "$name" >>"$summary_file"
+            printf '%s | 失败 | — | %s\n' "$name" "$reason" >>"$summary_file"
         fi
         route_err "$name 检测失败 (退出码 $code)"
+        if (( old_mtr_json )); then
+            route_err "当前 NextTrace 不支持 -r --json（需 v${ROUTE_MIN_NT_VERSION}+）；请运行 portman route install 或选择子菜单 10 升级。"
+        fi
         [[ -s $err ]] && sed -n '1,5p' "$err" >&2
         [[ -s $raw ]] && sed -n '1,3p' "$raw" >&2
         rm -f "$raw" "$err"

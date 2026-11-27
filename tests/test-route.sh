@@ -47,7 +47,7 @@ fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 expect() { grep -Fq -- "$2" "$1" || fail "未匹配：$2"; }
 
 bash portman.sh version > "$work/version"
-expect "$work/version" 'portman v1.9.1'
+expect "$work/version" 'portman v1.9.2'
 bash route-report.sh shanghai > "$work/shanghai"
 expect "$work/shanghai" '经过：中国电信 163 → 中国电信 CN2 → 中国电信本地网络'
 expect "$work/shanghai" '经过：中国联通国际 CUG → 中国联通 9929 → 中国联通 169 → 中国联通本地网络'
@@ -126,4 +126,38 @@ bash route-report.sh custom 192.0.2.1 --detail > "$work/emptygeo"
 expect "$work/emptygeo" '0.0ms'
 expect "$work/emptygeo" '未识别'
 
-printf '[PASS] bash 语法、三网识别、混合路径、中文逐跳、MTR、报告、苏州配置、自定义目标、异常处理\n'
+# 旧版 NextTrace (< v1.7.4) 在探测前应被 route_require 拦截并提示升级。
+cat > "$work/bin/nexttrace" <<'MOCK_OLD'
+#!/usr/bin/env bash
+if [[ ${1:-} == --version ]]; then
+    printf 'NextTrace v1.7.3 2026-08-26T22:30:27Z old\n'
+    exit 0
+fi
+printf -- '--mtr 不能与 --json 同时使用\n'
+exit 1
+MOCK_OLD
+chmod +x "$work/bin/nexttrace"
+if bash route-report.sh shanghai > "$work/oldver" 2>&1; then
+    fail '旧版 NextTrace 应该在探测前被拦截'
+fi
+expect "$work/oldver" '版本过旧'
+expect "$work/oldver" 'v1.7.4+'
+
+# 若未知版本号格式（如 dev 构建）依然报 --mtr/--json 冲突，探测失败提示也应给出升级指引。
+cat > "$work/bin/nexttrace" <<'MOCK_CONFLICT'
+#!/usr/bin/env bash
+if [[ ${1:-} == --version ]]; then
+    printf 'NextTrace dev 2026-01-01 deadbeef\n'
+    exit 0
+fi
+printf -- '--mtr 不能与 --json 同时使用\n'
+exit 1
+MOCK_CONFLICT
+chmod +x "$work/bin/nexttrace"
+if bash route-report.sh shanghai telecom > "$work/conflict" 2>&1; then
+    fail '--mtr 与 --json 冲突时探测应该失败'
+fi
+expect "$work/conflict" '不支持 -r --json'
+expect "$work/conflict" 'NextTrace 版本过旧'
+
+printf '[PASS] bash 语法、三网识别、混合路径、中文逐跳、MTR、报告、苏州配置、自定义目标、异常处理、旧版拦截\n'

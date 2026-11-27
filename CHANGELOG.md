@@ -2,6 +2,15 @@
 
 本文件记录 `Eggfin/port-manager` 的主要版本变更。已有功能保持兼容；网络路由检测只读，不修改防火墙或 SSH 设置。
 
+## v1.9.2 — 2026-11-28
+
+### 修复
+- **路由检测增加 NextTrace 最低版本（`>= v1.7.4`）校验与升级支持**：修复旧版 NextTrace（`<= v1.7.3`）执行 `-r --json` 时报错 `--mtr 不能与 --json 同时使用` 导致三网回程全部失败的问题。
+- **`route_doctor` / `route_require`**：检测 `nexttrace --version` 语义版本（自动剥离 ANSI 颜色码），版本低于 `v1.7.4` 时明确提示过旧并拒绝误跑探测。
+- **多路径自动切换**：当 `PATH` 中命中旧版 `nexttrace` 但标准目录（如 `/usr/local/bin/nexttrace`、`~/.local/bin/nexttrace`）存在兼容版本时，优先选用兼容版本并在 `doctor` 中给出提示。
+- **菜单 10（`portman route install`）支持就地升级**：检测到 NextTrace 版本过旧时不再误判为「依赖已齐全」，确认后直接调用官方安装脚本升级到最新版并回检版本。
+- **补充离线回归测试**：在 `tests/test-deps.sh` 与 `tests/test-route.sh` 新增旧版拦截、确认升级、多路径覆盖及 `--mtr`/`--json` 冲突提示用例。
+
 ## v1.9.1 — 2026-11-22
 
 ### 优化

@@ -37,7 +37,7 @@ cat > "$out" <<'INSTALLER'
 [ "$1" = --system ] || exit 7
 cat > "$MOCK_BIN/nexttrace" <<'NT'
 #!/bin/sh
-printf 'nexttrace-test-1.0\n'
+printf 'NextTrace v1.7.6 2026-11-06T00:00:00Z test\n'
 NT
 chmod +x "$MOCK_BIN/nexttrace"
 INSTALLER
@@ -65,4 +65,50 @@ grep -Fq "$work/bin/nexttrace" "$work/success"
 grep -Fq "$work/bin/jq" "$work/success"
 PATH="$p" bash route-report.sh doctor > "$work/doctor"
 grep -Fq '依赖检查通过' "$work/doctor"
-printf '[PASS] 安装取消、安装失败检测、jq/NextTrace 补装、安装后 doctor 验证\n'
+
+# 模拟已安装旧版 NextTrace (v1.7.3 < 1.7.4)：doctor 必须报错，install 必须提示升级而非跳过。
+cat > "$work/bin/nexttrace" <<'OLDNT'
+#!/bin/sh
+printf 'NextTrace v1.7.3 2026-08-26T22:30:27Z old\n'
+OLDNT
+chmod +x "$work/bin/nexttrace"
+
+if PATH="$p" bash route-report.sh doctor > "$work/doctor-old" 2>&1; then
+    echo "FAIL: outdated nexttrace doctor returned success"; exit 1
+fi
+grep -Fq '[过旧]' "$work/doctor-old"
+grep -Fq '1.7.3' "$work/doctor-old"
+grep -Fq '1.7.4' "$work/doctor-old"
+
+if printf 'n\n' | PATH="$p" bash route-report.sh install > "$work/cancel-upgrade" 2>&1; then
+    echo "FAIL: canceled upgrade returned success"; exit 1
+fi
+grep -Fq '版本过旧' "$work/cancel-upgrade"
+grep -Fq '已取消' "$work/cancel-upgrade"
+"$work/bin/nexttrace" --version | grep -Fq 'v1.7.3'
+
+printf 'y\n' | PATH="$p" bash route-report.sh install > "$work/upgrade" 2>&1
+grep -Fq '版本过旧' "$work/upgrade"
+grep -Fq '全部依赖安装并验证成功' "$work/upgrade"
+"$work/bin/nexttrace" --version | grep -Fq 'v1.7.6'
+PATH="$p" bash route-report.sh doctor > "$work/doctor-upgraded"
+grep -Fq '依赖检查通过' "$work/doctor-upgraded"
+
+# 多路径共存：PATH 中有旧版，但 ~/.local/bin 中有新版时应自动选用新版并提示。
+cat > "$work/bin/nexttrace" <<'OLDNT2'
+#!/bin/sh
+printf 'NextTrace v1.7.3 2026-08-26T22:30:27Z old\n'
+OLDNT2
+chmod +x "$work/bin/nexttrace"
+mkdir -p "$work/home/.local/bin"
+cat > "$work/home/.local/bin/nexttrace" <<'NEWNT'
+#!/bin/sh
+printf 'NextTrace v1.7.6 2026-11-06T00:00:00Z new\n'
+NEWNT
+chmod +x "$work/home/.local/bin/nexttrace"
+PATH="$p" HOME="$work/home" bash route-report.sh doctor > "$work/doctor-shadow"
+grep -Fq '依赖检查通过' "$work/doctor-shadow"
+grep -Fq "$work/home/.local/bin/nexttrace" "$work/doctor-shadow"
+grep -Fq '[提示]' "$work/doctor-shadow"
+
+printf '[PASS] 安装取消、安装失败检测、jq/NextTrace 补装、旧版拦截与升级、多路径切换、doctor 验证\n'
